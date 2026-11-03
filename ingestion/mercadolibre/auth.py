@@ -99,7 +99,9 @@ def _post_token(
             if attempt >= max_retries:
                 logger.warning("POST /oauth/token grant_type=%s failed: %s", grant_type, failure)
                 raise TransientAuthError(
-                    f"Token endpoint unavailable after {max_retries} retries ({failure})",
+                    f"Token endpoint unavailable after {max_retries} retries ({failure}). "
+                    "The refresh token was probably not consumed: retry later. If the next run "
+                    "gets invalid_grant, the owner must re-authorize.",
                     status=response.status_code if response is not None else None,
                 )
             wait = backoff_base_s * (2**attempt)

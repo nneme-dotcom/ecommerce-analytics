@@ -3,7 +3,7 @@ import logging
 import httpx
 import pytest
 
-from ingestion.mercadolibre.client import MercadoLibreClient, RequestCapReached
+from ingestion.mercadolibre.client import NOT_FOUND, MercadoLibreClient, RequestCapReached
 
 ACCESS = "fake-access-xyz"
 BASE = "https://api.test"
@@ -157,9 +157,9 @@ def test_200_with_null_or_invalid_body_is_recorded(body):
     assert client.errors == [{"path": "/products/MLA1", "status": 200}]
 
 
-def test_not_found_ok_returns_none_without_recording():
+def test_not_found_ok_returns_sentinel_without_recording():
     client, _ = make_client(lambda r: httpx.Response(404, json={}))
-    assert client.get("/products/MLA1/items", not_found_ok=True) is None
+    assert client.get("/products/MLA1/items", not_found_ok=True) is NOT_FOUND
     assert client.errors == []
     assert client.get("/products/MLA1/items") is None
     assert client.errors == [{"path": "/products/MLA1/items", "status": 404}]

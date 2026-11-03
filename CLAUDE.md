@@ -85,13 +85,13 @@ Filled in as each area is built. Keep this section accurate.
 | ML one-time authorization (owner, interactive; needs env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REDIRECT_URI`) | `python -m ingestion.mercadolibre.authorize` |
 | ML daily snapshot (env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`) | `python -m ingestion.mercadolibre.snapshot --out <storage-root> --new-refresh-token-file <path> [--date YYYY-MM-DD] [--categories ...]` |
 
-Snapshot exit codes (the scheduled workflow branches on these):
+Snapshot exit codes (ADR-008; the scheduled workflow branches on these):
 
 | Code | Meaning | Rotated refresh token file written? | Action |
 |------|---------|-------------------------------------|--------|
 | 0 | `success` or `partial` (data written; see `run.json`) | yes | save token |
-| 1 | `failed` (no category captured, or the snapshot could not be written) | yes | save token; investigate |
+| 1 | `failed` (no category captured, or aborted after the token was saved) | yes | save token; investigate |
 | 2 | re-authorization required (`invalid_grant`, or token endpoint rejected the credentials) | no | owner runs `python -m ingestion.mercadolibre.authorize` |
 | 3 | new refresh token could not be persisted | no | owner must re-authorize (old token already consumed) |
-| 4 | token endpoint unavailable after retries (429/5xx/network) | no | retry later; old token is probably still valid |
+| 4 | token endpoint unavailable after retries (429/5xx/network) | no | retry later: the old token is *probably* still valid; if the next run gets `invalid_grant` (exit 2), re-authorize |
 | 5 | configuration error (missing env vars) | no | fix the secrets/env |

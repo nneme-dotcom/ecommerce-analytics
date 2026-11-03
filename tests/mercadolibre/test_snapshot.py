@@ -62,6 +62,7 @@ RUN_FIELDS = {
     "request_cap_reached",
     "row_counts",
     "skipped_highlights",
+    "products_without_offers",
     "errors",
     "status",
 }
@@ -211,6 +212,7 @@ def test_happy_path_writes_contract_layout(fake, tmp_path):
     assert run["errors"] == []
     assert run["request_cap_reached"] is False
     assert run["skipped_highlights"] == {"ITEM": 1, "USER_PRODUCT": 1}
+    assert run["products_without_offers"] == 0
 
     data = {k: rows(tmp_path, k) for k in CONTRACT_FIELDS}
     for kind, records in data.items():
@@ -293,11 +295,14 @@ def test_pagination_reads_all_pages_and_never_requests_offset_at_total(fake, tmp
 
 
 def test_total_zero_gives_no_offers_and_no_further_pages(fake, tmp_path):
-    fake.offers["MLA2"] = []
+    fake.offers["MLA2"] = []  # 200 with paging.total == 0 and results []
     do_run(fake, tmp_path)
     assert "MLA2" not in {o["product_id"] for o in rows(tmp_path, "offers")}
     assert fake.item_pages("MLA2") == [(0, 50)]
-    assert read_run(tmp_path)["status"] == "success"
+    run = read_run(tmp_path)
+    assert run["status"] == "success"
+    assert run["errors"] == []
+    assert run["products_without_offers"] == 1
 
 
 def test_missing_paging_is_treated_as_single_page(fake, tmp_path):
@@ -325,12 +330,38 @@ def test_404_on_later_page_is_end_of_data_not_an_error(fake, tmp_path):
     assert len([o for o in rows(tmp_path, "offers") if o["product_id"] == "MLA2"]) == 1
 
 
-def test_404_on_first_page_is_an_error(fake, tmp_path):
+def test_404_on_first_page_means_no_offers_not_an_error(fake, tmp_path):
+    # e.g. an out-of-stock best seller: must not turn every run into `partial`
     fake.routes["items:MLA2"] = lambda r: httpx.Response(404, json={})
+    assert do_run(fake, tmp_path) == snapshot.EXIT_OK
+    run = read_run(tmp_path)
+    assert run["status"] == "success"
+    assert run["errors"] == []
+    assert run["products_without_offers"] == 1
+    assert fake.item_pages("MLA2") == [(0, 50)]
+    assert "MLA2" not in {o["product_id"] for o in rows(tmp_path, "offers")}
+
+
+def test_failed_first_page_is_an_error_not_no_offers(fake, tmp_path):
+    fake.routes["items:MLA2"] = lambda r: httpx.Response(500, json={})
     do_run(fake, tmp_path)
-    assert {"path": "/products/MLA2/items", "status": 404, "count": 1} in read_run(tmp_path)[
-        "errors"
-    ]
+    run = read_run(tmp_path)
+    assert run["products_without_offers"] == 0
+    assert {"path": "/products/MLA2/items", "status": 500, "count": 1} in run["errors"]
+
+
+def test_pagination_stops_when_a_page_adds_no_new_item(fake, tmp_path):
+    same_page = [fx.offer(i) for i in range(50)]
+
+    def repeating(request):
+        offset = int(parse_qs(request.url.query.decode())["offset"][0])
+        return httpx.Response(200, json=fx.offers_page(same_page, offset, 50, total=500))
+
+    fake.routes["items:MLA2"] = repeating
+    do_run(fake, tmp_path, max_offers_per_product=500)
+    assert fake.item_pages("MLA2") == [(0, 50), (50, 50)]
+    mla2 = [o for o in rows(tmp_path, "offers") if o["product_id"] == "MLA2"]
+    assert len(mla2) == 50
 
 
 def test_offers_deduplicated_by_item_id_across_shifting_pages(fake, tmp_path):
@@ -438,11 +469,12 @@ def test_crash_in_transport_is_contained_and_token_already_persisted(fake, tmp_p
     assert {"path": "/trends/MLA", "status": None, "count": 1} in run["errors"]
 
 
-def test_write_failure_returns_failed_but_token_is_persisted(fake, tmp_path):
+def test_write_failure_returns_failed_but_token_is_persisted(fake, tmp_path, caplog):
     out_root = tmp_path / "store-is-a-file"
     out_root.write_text("x")
     assert do_run(fake, tmp_path, out_root=out_root) == snapshot.EXIT_FAILED
     assert token_file(tmp_path).read_text() == NEW_REFRESH
+    assert "aborted in step ensure_storage_gitignore by unexpected FileExistsError" in caplog.text
 
 
 # --------------------------------------------------------------------------- token handling
@@ -513,6 +545,43 @@ def test_categories_lists_only_captured_ones(fake, tmp_path):
     assert run["categories"] == ["MLA1055"]
     assert run["categories_requested"] == ["MLA1055", "MLA1652"]
     assert run["status"] == "partial"
+
+
+def test_empty_highlights_category_is_not_captured(fake, tmp_path):
+    fake.routes["/highlights/MLA/category/MLA1652"] = lambda r: httpx.Response(
+        200, json={"content": []}
+    )
+    do_run(fake, tmp_path)
+    run = read_run(tmp_path)
+    assert run["categories"] == ["MLA1055"]
+    assert run["status"] == "partial"
+    assert {"path": "/highlights/MLA/category/MLA1652", "status": None, "count": 1} in run["errors"]
+
+
+def _empty_highlights():
+    empty = FakeML()
+    for cat in ("MLA1055", "MLA1652"):
+        empty.routes[f"/highlights/MLA/category/{cat}"] = lambda r: httpx.Response(
+            200, json={"content": []}
+        )
+    return empty
+
+
+def test_all_empty_highlights_is_failed(tmp_path):
+    assert do_run(_empty_highlights(), tmp_path) == snapshot.EXIT_FAILED
+    run = read_run(tmp_path)
+    assert run["status"] == "failed"
+    assert run["categories"] == []
+    assert run["row_counts"]["highlights"] == 0
+
+
+def test_empty_highlights_rerun_does_not_replace_success(fake, tmp_path):
+    assert do_run(fake, tmp_path) == snapshot.EXIT_OK
+    good = read_run(tmp_path)
+    assert good["status"] == "success"
+    assert do_run(_empty_highlights(), tmp_path) == snapshot.EXIT_FAILED
+    assert read_run(tmp_path)["run_id"] == good["run_id"]
+    assert rows(tmp_path, "highlights")
 
 
 def test_failed_when_no_highlights(fake, tmp_path):
@@ -621,7 +690,7 @@ def test_storage_gitignore_written_and_preserved(fake, tmp_path):
     assert (tmp_path / "store" / ".gitignore").read_text().splitlines() == lines
 
 
-def test_failed_swap_keeps_previous_snapshot(fake, tmp_path, monkeypatch):
+def test_failed_swap_keeps_previous_snapshot(fake, tmp_path, monkeypatch, caplog):
     do_run(fake, tmp_path)
     good = read_run(tmp_path)
     real_rename = Path.rename
@@ -633,6 +702,7 @@ def test_failed_swap_keeps_previous_snapshot(fake, tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "rename", failing_rename)
     assert do_run(FakeML(), tmp_path) == snapshot.EXIT_FAILED
+    assert "aborted in step write_snapshot" in caplog.text
     monkeypatch.undo()
     assert read_run(tmp_path)["run_id"] == good["run_id"]
     assert [p.name for p in base_dir(tmp_path).iterdir()] == [f"snapshot_date={DATE}"]

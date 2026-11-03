@@ -103,14 +103,13 @@ def main() -> int:
         return 2
 
     try:
-        tokens = exchange_authorization_code(
-            client_id, client_secret, code, redirect_uri, verifier
-        )
+        tokens = exchange_authorization_code(client_id, client_secret, code, redirect_uri, verifier)
     except AuthError as exc:
-        print(f"Authorization failed: HTTP {exc.status} ({exc.error or 'unknown error'}).",
-              file=sys.stderr)
-        print("Start again from Step 1 (codes are single-use and expire quickly).",
-              file=sys.stderr)
+        print(
+            f"Authorization failed: HTTP {exc.status} ({exc.error or 'unknown error'}).",
+            file=sys.stderr,
+        )
+        print("Start again from Step 1 (codes are single-use and expire quickly).", file=sys.stderr)
         return 1
 
     print()

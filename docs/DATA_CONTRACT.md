@@ -27,10 +27,11 @@ Writing rules (task 1.2):
   (old folder → `.old-<date>-<run_id>/`, new folder in, old folder deleted only after the new one is in
   place). Re-running a date replaces the whole folder (no merging). All five files are always present
   (a `.jsonl.gz` may be empty).
-- **Replacement rule:** a run replaces the existing folder for the same date only if its status ranks
+- **Replacement rule (ADR-007):** a run replaces the existing folder for the same date only if its status ranks
   at least as high: `success` > `partial` > `failed`. So `partial` never replaces `success`; `partial`
   may replace `partial` or `failed`; `failed` only replaces `failed`. With no existing folder, any run
-  writes one (a `failed` one keeps the attempt visible).
+  writes one (a `failed` one keeps the attempt visible). Empty data never counts as success: a
+  category whose highlights come back empty is not captured (it is an `errors` entry).
 - At run start, stale `.tmp-*` folders (killed runs) are deleted; a stale `.old-*` is deleted if its
   day folder exists, or **restored** if it doesn't (killed between the two renames). The job also
   makes sure `<storage root>/.gitignore` contains `.tmp-*/` and `.old-*/` (appending if needed), so
@@ -40,8 +41,10 @@ Writing rules (task 1.2):
   calls; the others are counted in `run.json.skipped_highlights`.
 - Products are deduplicated within a run (fetched once even if ranked in several categories).
 - Offers: `/products/{id}/items` is paged with `offset`/`limit` (page size 50). The job never requests
-  `offset >= paging.total` (the API answers 404); a 404 on a later page is end of data, not an error.
-  A response without `paging` is a single page. Offers are deduplicated by `item_id` per product and
+  `offset >= paging.total` (the API answers 404). A 404 on the **first** page means the product has no
+  offers (e.g. out of stock) and a 404 on a later page is end of data; neither is an error. Products
+  with no offers (first-page 404, or 200 with `total: 0`) are counted in `products_without_offers`.
+  A response without `paging` is a single page; pagination also stops when a page adds no new `item_id`. Offers are deduplicated by `item_id` per product and
   capped at 100 per product (`--max-offers-per-product`). If the request cap is hit mid-pagination,
   offers already fetched are kept (`request_cap_reached: true`).
 - Malformed payloads never stop the run: wrong container types become null (objects/scalars) or `[]`
@@ -56,15 +59,16 @@ Writing rules (task 1.2):
 | snapshot_date | date | |
 | started_at / finished_at | timestamp UTC | |
 | site_id | string | `MLA` |
-| categories | string[] | category ids actually captured (highlights returned 200 with an object) |
+| categories | string[] | category ids actually captured (highlights returned ≥1 entry) |
 | categories_requested | string[] | category ids the run was asked for |
 | requests_made | int | API GETs incl. retries (the token refresh is not counted) |
 | request_cap | int | hard cap for this run |
 | request_cap_reached | bool | collection stopped early because of the cap |
 | row_counts | object | `{highlights, products, offers, trends}` line counts |
 | skipped_highlights | object | per-`type` count of highlight entries written but not followed (e.g. `{"USER_PRODUCT": 9, "ITEM": 3}`); `UNKNOWN` = no type, `MALFORMED` = entries dropped for having no id |
-| errors | object[] | `{path, status, count}` — no tokens, no payloads; `status` is null for network errors/timeouts |
-| status | string | `success` (no errors) · `partial` (some errors or cap reached, data written) · `failed` (no category captured) |
+| products_without_offers | int | followed products whose offers endpoint answered with no offers (first-page 404 or `total: 0`) — not errors |
+| errors | object[] | `{path, status, count}` — no tokens, no payloads; `status` is null for network errors/timeouts, malformed or empty payloads and unexpected exceptions |
+| status | string | `success` (≥1 category captured, no errors, cap not reached) · `partial` (≥1 category captured, but some errors or cap reached) · `failed` (no category captured: every highlights call failed or came back empty) |
 
 ### highlights
 | field | type | source |
@@ -124,13 +128,6 @@ All five verified live on 2026-11-03 (each returned 20 highlights; see docs/API_
 | MLA1002 | Televisores | yes (2026-11-03) |
 | MLA109027 | Zapatillas | yes (2026-11-03) |
 | MLA5726 | Electrodomésticos y Aires Ac. | yes (2026-11-03) |
-
-----|-------------------|----------|
-| MLA1055 | Cell phones (Celulares y Smartphones) | yes (probe) |
-| MLA1652 | Notebooks | to be validated |
-| MLA1002 | TVs (Televisores) | to be validated |
-| MLA109027 | Sneakers (Zapatillas) | to be validated |
-| MLA5726 | Home appliances (Electrodomésticos) | to be validated |
 
 ---
 

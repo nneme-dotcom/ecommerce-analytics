@@ -30,6 +30,16 @@ DEFAULT_TIMEOUT_S = 30.0
 logger = logging.getLogger(__name__)
 
 
+class _NotFound:
+    """Sentinel returned by ``get(..., not_found_ok=True)`` on a 404."""
+
+    def __repr__(self) -> str:
+        return "NOT_FOUND"
+
+
+NOT_FOUND = _NotFound()
+
+
 class RequestCapReached(RuntimeError):
     """The per-run request cap was hit; no further requests are sent."""
 
@@ -90,9 +100,9 @@ class MercadoLibreClient:
         """GET ``path`` and return decoded JSON, or ``None`` if the call ultimately failed.
 
         Failures (including a 200 whose body is not JSON or is JSON ``null``) are appended to
-        ``self.errors``. With ``not_found_ok`` a 404 returns ``None`` without being recorded (used
-        for end-of-data on paginated endpoints). Raises ``RequestCapReached`` when the cap would be
-        exceeded.
+        ``self.errors``. With ``not_found_ok`` a 404 returns the ``NOT_FOUND`` sentinel without
+        being recorded (e.g. no offers / end of data on paginated endpoints). Raises
+        ``RequestCapReached`` when the cap would be exceeded.
         """
         if not path.startswith("/"):
             path = "/" + path
@@ -110,8 +120,8 @@ class MercadoLibreClient:
                     self._record_error(path, status)
                 return body
             if status == 404 and not_found_ok:
-                logger.debug("GET %s status=404 (treated as end of data)", path)
-                return None
+                logger.debug("GET %s status=404 (not found, not an error)", path)
+                return NOT_FOUND
             retryable = status is None or _is_retryable(status)
             if retryable and attempt < self.max_retries:
                 wait = self._backoff(attempt, response)

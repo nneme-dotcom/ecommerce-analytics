@@ -56,3 +56,35 @@ The job must treat "token persisted" as part of success.
 ## ADR-006 — Dashboard in React + TypeScript (2026-11-03)
 
 **Decision.** Custom dashboard instead of Metabase/Superset, to also demonstrate frontend engineering.
+
+## ADR-007 — Snapshot replacement rule (2026-11-03)
+
+**Context.** The daily snapshot job may be re-run for the same `snapshot_date` (manual re-run,
+retry after an incident). A worse re-run must not destroy a better snapshot that already exists.
+
+**Decision.** Rank run statuses `success` > `partial` > `failed`. A run replaces the existing day
+folder only if its status ranks at least as high (so `partial` never replaces `success`; `partial`
+may replace `partial` or `failed`; `failed` only replaces `failed`). Empty data never counts as
+success: a category is captured only if its highlights return at least one entry, and a run with no
+captured category is `failed`. Products without offers (first-page 404 or `total: 0`) are not errors.
+
+**Consequences.** Re-runs are safe. A day can only get better. Details in DATA_CONTRACT §1.
+
+## ADR-008 — Snapshot job exit codes (2026-11-03)
+
+**Context.** The scheduled workflow (task 1.3) must decide, without reading logs, whether to save the
+rotated refresh token, commit data, retry later or alert the owner.
+
+**Decision.** `python -m ingestion.mercadolibre.snapshot` exits with:
+
+| Code | Meaning | Token file written? |
+|------|---------|---------------------|
+| 0 | run finished `success` or `partial` (data written, unless a better snapshot already existed — ADR-007) | yes |
+| 1 | run `failed` (no category captured), or aborted after the token was saved (e.g. write error) | yes |
+| 2 | re-authorization required (`invalid_grant`, or credentials rejected) | no |
+| 3 | new refresh token could not be saved (old one already consumed → re-authorize) | no |
+| 4 | token endpoint unavailable after retries (transient); old token probably still valid | no |
+| 5 | missing environment variables | no |
+
+**Consequences.** The workflow saves the token only when the file exists (0/1), commits data only on
+0/1, retries later on 4, and alerts the owner on 2/3/5. Codes are mirrored in CLAUDE.md.

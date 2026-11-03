@@ -45,6 +45,7 @@ from ingestion.mercadolibre.auth import (
 from ingestion.mercadolibre.client import (
     API_BASE_URL,
     DEFAULT_DELAY_S,
+    NOT_FOUND,
     MercadoLibreClient,
     RequestCapReached,
 )
@@ -195,6 +196,7 @@ class Collected:
     rows: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: {f: [] for f in FILES})
     categories_captured: list[str] = field(default_factory=list)
     skipped_highlights: Counter[str] = field(default_factory=Counter)
+    products_without_offers: int = 0
     cap_reached: bool = False
 
     def add(self, kind: str, records: Iterable[dict[str, Any]], captured_at: str) -> None:
@@ -211,14 +213,17 @@ class OffersResult:
     offers: list[dict[str, Any]]
     captured_at: str | None
     cap_reached: bool = False
+    no_offers: bool = False  # the product has no offers (first page 404, or total 0 / empty)
 
 
 def fetch_offers(client: MercadoLibreClient, product_id: str, max_offers: int) -> OffersResult:
     """Offers of one catalog product: paginated, deduplicated by ``item_id``, capped.
 
-    Never requests ``offset >= paging.total`` (the API answers 404). A 404 on a later page is
-    treated as end of data. A failed later page keeps the offers already fetched. If the request
-    cap is hit mid-pagination, the offers fetched so far are kept and ``cap_reached`` is set.
+    Never requests ``offset >= paging.total`` (the API answers 404). A 404 on the first page means
+    "no offers" (e.g. out of stock) and a 404 on a later page means end of data; neither is an
+    error. Stops when a page adds no new ``item_id``. A failed later page keeps the offers already
+    fetched. If the request cap is hit mid-pagination, the offers fetched so far are kept and
+    ``cap_reached`` is set.
     """
     path = f"/products/{product_id}/items"
     offers: list[dict[str, Any]] = []
@@ -229,15 +234,18 @@ def fetch_offers(client: MercadoLibreClient, product_id: str, max_offers: int) -
     try:
         while len(offers) < max_offers and (total is None or offset < total):
             limit = min(OFFERS_PAGE_SIZE, max_offers - len(offers))
-            payload = client.get(
-                path, params={"offset": offset, "limit": limit}, not_found_ok=offset > 0
-            )
+            payload = client.get(path, params={"offset": offset, "limit": limit}, not_found_ok=True)
+            if payload is NOT_FOUND:
+                if offset == 0:
+                    return OffersResult([], None, no_offers=True)
+                break
             if not isinstance(payload, dict):
                 if payload is not None:
                     client.record_error(path, None)  # 200 with a non-object body
                 break
             captured_at = captured_at or _now()
             results = _list(payload.get("results"))
+            added = 0
             for offer in results:
                 if not isinstance(offer, dict):
                     continue
@@ -247,14 +255,18 @@ def fetch_offers(client: MercadoLibreClient, product_id: str, max_offers: int) -
                         continue
                     seen_items.add(item_id)
                 offers.append(offer)
+                added += 1
             paging_total = _dict(payload.get("paging")).get("total")
             total = paging_total if isinstance(paging_total, int) else None
             offset += len(results)
-            if not results or total is None:  # empty page or no paging info: single page
+            # Stop on: empty page, no paging info (single page), or a page with nothing new.
+            if not results or total is None or added == 0:
                 break
     except RequestCapReached:
         return OffersResult(offers[:max_offers], captured_at, cap_reached=True)
-    return OffersResult(offers[:max_offers], captured_at)
+    # "No offers" only if the API answered (captured_at set); a failed first page is an error.
+    no_offers = captured_at is not None and not offers
+    return OffersResult(offers[:max_offers], captured_at, no_offers=no_offers)
 
 
 def _collect_product(
@@ -268,6 +280,8 @@ def _collect_product(
         client.record_error(product_path, None)  # 200 with a non-object body
 
     result = fetch_offers(client, product_id, max_offers)
+    if result.no_offers:
+        out.products_without_offers += 1
     if result.captured_at is not None:
         out.add("offers", (map_offer(product_id, o) for o in result.offers), result.captured_at)
     if result.cap_reached:
@@ -312,9 +326,14 @@ def collect(
             client.record_error(path, None)
             return
         result = map_highlights(category_id, payload)
+        out.skipped_highlights.update(result.skipped)
+        if not result.rows:
+            # An empty ranking is not a captured category (empty data never counts as success).
+            logger.warning("category %s: highlights returned no entries", category_id)
+            client.record_error(path, None)
+            return
         out.add("highlights", result.rows, _now())
         out.categories_captured.append(category_id)
-        out.skipped_highlights.update(result.skipped)
         followed = [r["product_id"] for r in result.rows if r["type"] == FOLLOWED_TYPE]
         logger.info(
             "category %s: %d ranked entries, %d products followed",
@@ -504,7 +523,7 @@ def run(
         logger.error("%s", exc)
         return EXIT_REAUTHORIZE
     except TransientAuthError as exc:
-        logger.error("token refresh failed transiently: %s; retry later, no re-auth needed", exc)
+        logger.error("token refresh failed transiently: %s", exc)
         return EXIT_TOKEN_TRANSIENT
     except AuthError as exc:
         logger.error("token refresh rejected: %s; check the app credentials or re-authorize", exc)
@@ -518,9 +537,12 @@ def run(
         return EXIT_TOKEN_PERSIST
     logger.info("new refresh token persisted")
 
+    step = "ensure_storage_gitignore"
     try:
         ensure_storage_gitignore(out_root)
+        step = "cleanup_stale"
         cleanup_stale(out_root)
+        step = "collect"
         with MercadoLibreClient(
             tokens.access_token,
             base_url=base_url,
@@ -533,6 +555,7 @@ def run(
             errors = client.error_summary()
             requests_made = client.requests_made
 
+        step = "build_run_meta"
         status = decide_status(collected, errors)
         run_meta = {
             "run_id": run_id,
@@ -547,12 +570,15 @@ def run(
             "request_cap_reached": collected.cap_reached,
             "row_counts": {kind: len(collected.rows[kind]) for kind in FILES},
             "skipped_highlights": dict(sorted(collected.skipped_highlights.items())),
+            "products_without_offers": collected.products_without_offers,
             "errors": errors,
             "status": status,
         }
+        step = "write_snapshot"
         write_snapshot(out_root, snapshot_date, run_meta, collected)
     except Exception as exc:  # noqa: BLE001 - token is already safe; report and fail the run
-        logger.error("snapshot aborted by unexpected %s", type(exc).__name__)
+        # Step name and exception type only, never values.
+        logger.error("snapshot aborted in step %s by unexpected %s", step, type(exc).__name__)
         return EXIT_FAILED
 
     logger.info(
