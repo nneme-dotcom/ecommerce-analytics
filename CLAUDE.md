@@ -79,3 +79,5 @@ Filled in as each area is built. Keep this section accurate.
 |------|---------|
 | Lint Python | `ruff check .` |
 | Test Python | `pytest` |
+| Install Python deps | `pip install -r requirements.txt` |
+| ML one-time authorization (owner, interactive; needs env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REDIRECT_URI`) | `python -m ingestion.mercadolibre.authorize` |
