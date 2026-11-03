@@ -51,3 +51,17 @@ Units sold / orders of other sellers. Ranking position is the demand proxy.
 - **`/products/{id}/items` paging:** `?limit=50&offset=0` → `paging {limit: 50, offset: 0, total: 42}`
   with 42 results. `limit=10&offset=10` works. `limit=100` returns 200. An offset at or beyond
   `total` returns **404** (so never request it; a 404 on a later page means end of data).
+
+## Token behaviour — 2026-11-03 (orchestrator, live)
+
+- **Refresh works for this PKCE app** with only `grant_type=refresh_token`, `client_id`,
+  `client_secret`, `refresh_token` (no `code_verifier`). Each refresh returns a new refresh token.
+- **The previous refresh token kept working right after a rotation** (a reuse returned 200).
+  Don't rely on this grace: always persist the newest token (ADR-004).
+- **A refresh token issued while authorizing with one client secret was rejected (`invalid_grant`)
+  when refreshed with a renewed client secret**, even though both secrets were accepted by the token
+  endpoint (old one still in its renewal grace period). Observed, not documented by Mercado Libre.
+  Practical rule: after renewing the client secret, re-run `authorize` **with the new secret** and
+  store that refresh token.
+- Telling a bad client secret from a bad refresh token: send a deliberately fake refresh token —
+  valid client → `400 invalid_grant`; wrong secret → `400 invalid_client` (used by `check_secrets.py`).

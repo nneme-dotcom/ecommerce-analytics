@@ -20,6 +20,14 @@ Files touched:
 
 ## Log
 
+### 2026-11-03 — orchestrator — 1.3 first live run
+Done: first real snapshot (run 41729877814): `success`, 195 requests, 100 highlights, 87 products,
+2,313 offers, 50 trends, 0 errors; skipped highlights ITEM 3 / USER_PRODUCT 10. Rotated refresh token
+saved to `ML_REFRESH_TOKEN`; day folder pushed to the private data repo.
+Gotchas: the first two runs failed with exit 2 because the stored refresh token had been issued with
+the pre-renewal client secret (see docs/API_PROBE.md "Token behaviour"). Run `Check secrets` before
+spending a refresh token. 1.3 stays `in review` until 3 consecutive daily successes.
+
 ### 2026-11-03 — orchestrator — pre-flight for 1.3 (PR #4)
 Done: manual `Check secrets` workflow. Proves, without printing values or spending the refresh token:
 secrets present/well-formed; ML client id/secret accepted (fake refresh token → `invalid_grant` = valid
