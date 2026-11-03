@@ -88,3 +88,29 @@ rotated refresh token, commit data, retry later or alert the owner.
 
 **Consequences.** The workflow saves the token only when the file exists (0/1), commits data only on
 0/1, retries later on 4, and alerts the owner on 2/3/5. Codes are mirrored in CLAUDE.md.
+
+## ADR-009 — Scheduled snapshot workflow: step conditions and data-commit guard (2026-11-03)
+
+**Context.** `.github/workflows/ml-daily-snapshot.yml` (task 1.3) runs the snapshot daily. The refresh
+token is single-use (ADR-004), so a lost rotated token means a manual re-authorization; a commit made
+after an interrupted folder swap could delete a good day from the data repo.
+
+**Decision.**
+- Only the token-save step runs with `if: always()`: if a token file exists (even after a killed or
+  timed-out snapshot step) it is written to `ML_REFRESH_TOKEN` with `gh secret set` via
+  `DATA_REPO_PAT` (3 attempts), then shredded. No file = secret untouched (exit 2/3/4/5).
+- The snapshot step never fails (`set +e`); its exit code is a step output. The step timeout (40 min)
+  is below the job timeout (50 min) so the token step still runs after a hang.
+- The data commit runs on `!cancelled()` and only when the snapshot step **itself reported** exit
+  0 or 1 (a killed step reports nothing). It also runs if the token save failed: the data is valid.
+  It commits only when `snapshot_date=<date>/run.json` exists and **refuses any commit that deletes a
+  tracked file** (every day folder has the same five files, so a deletion can only come from an
+  interrupted swap). No changes (ADR-007 kept a better day) = no commit.
+- The date is computed once (UTC) and passed with `--date`, so the run, the summary and the commit
+  message refer to the same day even across midnight.
+- One global `concurrency` group, `cancel-in-progress: false`; the job runs only on `main`
+  (every run consumes the token, so branch code must not run it).
+- `GITHUB_TOKEN` is `contents: read`; all writes go through the fine-grained PAT.
+
+**Consequences.** If the data contract ever renames or drops a snapshot file, the deletion guard
+will refuse the first re-run of an existing day; update the guard in the same PR as the contract.

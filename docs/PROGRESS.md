@@ -4,9 +4,9 @@ Current state at the top; handoff log below (newest first).
 
 ## Current state
 
-- **Phase:** 0 — Foundations
-- **Next up:** 1.1 / 1.2 / 1.3 (start the ML history ASAP)
-- **Blockers:** owner must rotate the ML client secret and create a fine-grained PAT before the scheduled job can run.
+- **Phase:** 1 — Data in
+- **Next up:** merge 1.3 and watch the first scheduled runs (acceptance: 3 consecutive successful days); 1.4 / 1.5
+- **Blockers:** owner must create the repo secrets `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`, `DATA_REPO_PAT` before the scheduled job can run.
 
 ## Handoff template
 
@@ -19,6 +19,29 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-03 — devops — 1.3 (branch `devops/ml-daily-snapshot`)
+Done: `.github/workflows/ml-daily-snapshot.yml`: daily at 05:23 UTC + `workflow_dispatch`, main only,
+`permissions: contents: read`, one `concurrency` group without cancel-in-progress, job timeout 50 min
+(snapshot step 40 min). Checks out the private data repo into `data/` with `DATA_REPO_PAT`, runs the
+snapshot with `--out data --date <UTC today> --new-refresh-token-file $RUNNER_TEMP/ml_refresh_token`,
+captures the exit code as a step output. Token step (`always()`, the only one): saves the file to
+`ML_REFRESH_TOKEN` via `gh secret set` (3 attempts, value masked, file shredded) only if it exists.
+Commit step: only on exit 0/1 reported by the step, only if the day's `run.json` exists, refuses
+commits that delete tracked files, skips when nothing changed; message `snapshot YYYY-MM-DD (status)`.
+Last step fails the job with a human message per exit code. `scripts/summarize_run.py` (stdlib only)
+writes the `$GITHUB_STEP_SUMMARY` table (counts only) and `::warning::` annotations (no offers for any
+followed product / offers 0 with products > 0, partial, request cap reached); 19 new tests (113 total).
+ADR-009 records the step conditions and the commit guard. actionlint 1.7.7 + shellcheck clean;
+token and commit steps dry-run locally against a stub `gh` and a scratch git remote.
+Not done / open: never run on GitHub (needs the secrets). CLAUDE.md Commands not updated (agents may
+not edit CLAUDE.md without the owner): proposed rows are in the PR description.
+Gotchas for the next agent: the workflow only becomes dispatchable once it is on `main`. If the data
+contract adds/renames/drops a snapshot file, update the deletion guard in the commit step (ADR-009).
+`scripts/` is imported in tests as `scripts.summarize_run` (namespace package via `pythonpath`);
+don't add a `tests/scripts/` package (name clash).
+Files touched: .github/workflows/ml-daily-snapshot.yml, scripts/summarize_run.py,
+tests/test_summarize_run.py, docs/DECISIONS.md, docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-03 — data-engineer — 1.2 (PR #3, after review round 2)
 Done: `python -m ingestion.mercadolibre.snapshot`. Refreshes the token (transient 429/5xx/network
