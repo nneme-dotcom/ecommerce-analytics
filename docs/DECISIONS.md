@@ -21,17 +21,20 @@ Mercado Libre API (live daily snapshots) for competitive-pricing analytics.
 
 **Decision.** Code, comments, docs and commits are in English. Reviewers are Amazon recruiters/engineers.
 
-## ADR-003 — Raw Mercado Libre data stays out of the public repo (2026-11-03) — *storage location OPEN*
+## ADR-003 — Raw Mercado Libre data stays out of the public repo (2026-11-03)
 
 **Context.** The repo is public from day one. Raw snapshots are third-party data obtained
 through the official API under its terms; republishing them wholesale is not our purpose.
 
 **Decision.** Raw snapshots are never committed here. Only code, schemas, and aggregated outputs are.
 
-**Open question — where do raw snapshots live?** Options:
+**Where raw snapshots live — decided: (a) private companion repo `nneme-dotcom/ecommerce-analytics-data`.** Options considered:
 - (a) A private companion repo written by the scheduled workflow (free, simple, needs a fine-grained PAT).
 - (b) AWS S3 (free tier, production-like, needs an AWS account now instead of in Phase 4).
 - (c) A managed Postgres free tier (e.g. Neon/Supabase), loading snapshots directly.
+
+Why (a): free, zero new accounts, versioned history of every snapshot. The scheduled workflow
+pushes with a fine-grained PAT scoped to that repo only. Can migrate to S3 in Phase 4 without changing the layout.
 
 ## ADR-004 — OAuth with PKCE and rotating refresh tokens (2026-11-03)
 

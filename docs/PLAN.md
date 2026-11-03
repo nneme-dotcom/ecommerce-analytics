@@ -10,7 +10,7 @@ Status: `todo` · `in progress` · `in review` · `done`.
 | 0.1 | Repo memory: CLAUDE.md, PLAN, DATA_CONTRACT, DECISIONS, PROGRESS | orchestrator | done | Files exist and are consistent |
 | 0.2 | Agent role definitions in `.claude/agents/` | orchestrator | done | One file per role, each with scope and boundaries |
 | 0.3 | CI: lint + tests on every PR | devops | done | Workflow runs green on `main` |
-| 0.4 | Decide where raw ML snapshots are stored | owner | todo | ADR-003 has a chosen option |
+| 0.4 | Decide where raw ML snapshots are stored | owner | done | ADR-003 has a chosen option |
 
 ## Phase 1 — Data in (priority: start the Mercado Libre history as early as possible)
 

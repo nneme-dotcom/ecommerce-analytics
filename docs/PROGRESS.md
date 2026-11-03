@@ -5,8 +5,8 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 0 — Foundations
-- **Next up:** 0.4 (decide raw snapshot storage) → 1.1 / 1.2 / 1.3 (start the ML history ASAP)
-- **Blockers:** owner decision on ADR-003 storage; owner must rotate the ML client secret before it is stored in GitHub secrets.
+- **Next up:** 1.1 / 1.2 / 1.3 (start the ML history ASAP)
+- **Blockers:** owner must rotate the ML client secret and create a fine-grained PAT before the scheduled job can run.
 
 ## Handoff template
 
@@ -24,6 +24,6 @@ Files touched:
 Done: repo scaffold, project memory docs, agent role definitions, CI workflow.
 Verified the Mercado Libre API by hand (see docs/API_PROBE.md): auth works with PKCE; catalog,
 best sellers, offers per product and trends work; general search and item detail are blocked.
-Not done / open: ADR-003 storage choice.
+ADR-003 decided: raw snapshots go to the private repo `ecommerce-analytics-data`.
 Gotchas: the ML app enforces PKCE; refresh tokens rotate. Nothing that calls the ML API can be run
 from the agents' cloud workspace — use mocks/fixtures.
