@@ -23,14 +23,30 @@ Every line carries `snapshot_date`, `run_id` and `captured_at` (UTC ISO-8601, e.
 the time the source response was received — for offers, the first page of that product).
 
 Writing rules (task 1.2):
-- The day folder is written to a temp folder and swapped in by rename, so re-running a date replaces
-  the whole folder (no merging). All five files are always present (a `.jsonl.gz` may be empty).
-- A `failed` run never replaces an existing `success`/`partial` folder for the same date; if there is
-  none, it writes the folder with `status: failed` so the attempt is visible.
-- Products are deduplicated within a run (fetched once even if ranked in several categories);
-  highlights keep one line per (category, product).
-- Offers: `/products/{id}/items` is paged with `offset`/`limit` (page size 50) until `paging.total`,
-  capped at 100 offers per product (`--max-offers-per-product`).
+- The day folder is written to `mercadolibre/.tmp-<date>-<run_id>/`, then swapped in by rename
+  (old folder → `.old-<date>-<run_id>/`, new folder in, old folder deleted only after the new one is in
+  place). Re-running a date replaces the whole folder (no merging). All five files are always present
+  (a `.jsonl.gz` may be empty).
+- **Replacement rule:** a run replaces the existing folder for the same date only if its status ranks
+  at least as high: `success` > `partial` > `failed`. So `partial` never replaces `success`; `partial`
+  may replace `partial` or `failed`; `failed` only replaces `failed`. With no existing folder, any run
+  writes one (a `failed` one keeps the attempt visible).
+- At run start, stale `.tmp-*` folders (killed runs) are deleted; a stale `.old-*` is deleted if its
+  day folder exists, or **restored** if it doesn't (killed between the two renames). The job also
+  makes sure `<storage root>/.gitignore` contains `.tmp-*/` and `.old-*/` (appending if needed), so
+  those folders are never committed to the data repo.
+- Highlights: **every** ranked entry is written (any `type`), deduplicated per (category, id), so
+  ranking positions stay complete. Only `type == PRODUCT` entries are followed with product/offer
+  calls; the others are counted in `run.json.skipped_highlights`.
+- Products are deduplicated within a run (fetched once even if ranked in several categories).
+- Offers: `/products/{id}/items` is paged with `offset`/`limit` (page size 50). The job never requests
+  `offset >= paging.total` (the API answers 404); a 404 on a later page is end of data, not an error.
+  A response without `paging` is a single page. Offers are deduplicated by `item_id` per product and
+  capped at 100 per product (`--max-offers-per-product`). If the request cap is hit mid-pagination,
+  offers already fetched are kept (`request_cap_reached: true`).
+- Malformed payloads never stop the run: wrong container types become null (objects/scalars) or `[]`
+  (lists); an unexpected exception while handling trends, one category or one product is recorded in
+  `errors` as `{path, status: null}` and the run continues.
 - `?` = nullable. Fields not confirmed by docs/API_PROBE.md are read defensively and may be null.
 
 ### run.json
@@ -40,20 +56,23 @@ Writing rules (task 1.2):
 | snapshot_date | date | |
 | started_at / finished_at | timestamp UTC | |
 | site_id | string | `MLA` |
-| categories | string[] | category ids captured |
+| categories | string[] | category ids actually captured (highlights returned 200 with an object) |
+| categories_requested | string[] | category ids the run was asked for |
 | requests_made | int | API GETs incl. retries (the token refresh is not counted) |
 | request_cap | int | hard cap for this run |
 | request_cap_reached | bool | collection stopped early because of the cap |
 | row_counts | object | `{highlights, products, offers, trends}` line counts |
+| skipped_highlights | object | per-`type` count of highlight entries written but not followed (e.g. `{"USER_PRODUCT": 9, "ITEM": 3}`); `UNKNOWN` = no type, `MALFORMED` = entries dropped for having no id |
 | errors | object[] | `{path, status, count}` — no tokens, no payloads; `status` is null for network errors/timeouts |
-| status | string | `success` (no errors) · `partial` (some errors or cap reached, data written) · `failed` (no highlights for any category) |
+| status | string | `success` (no errors) · `partial` (some errors or cap reached, data written) · `failed` (no category captured) |
 
 ### highlights
 | field | type | source |
 |-------|------|--------|
 | category_id | string | request param |
-| position | int | `content[].position` |
-| product_id | string | `content[].id` (only `type == PRODUCT`) |
+| position | int? | `content[].position` |
+| product_id | string | `content[].id` — a catalog product id when `type == PRODUCT`, otherwise the id of that type's entity |
+| type | string? | `content[].type`: `PRODUCT` · `USER_PRODUCT` · `ITEM` (only `PRODUCT` is followed) |
 
 ### products
 | field | type | source |
@@ -96,11 +115,17 @@ Writing rules (task 1.2):
 
 ### Initial categories (`MLA`)
 Default of `python -m ingestion.mercadolibre.snapshot` (override with `--categories`).
-Only `MLA1055` is verified (probe). **The other four are to be validated against `/sites/MLA/categories`
-in the first live run** — a wrong id shows up as a 404 on `/highlights/MLA/category/{id}` in `run.json.errors`.
+All five verified live on 2026-11-03 (each returned 20 highlights; see docs/API_PROBE.md).
 
-| id | intended category | verified |
-|----|-------------------|----------|
+| id | category (as named by the API) | verified |
+|----|--------------------------------|----------|
+| MLA1055 | Celulares y Smartphones | yes (2026-11-03) |
+| MLA1652 | Notebooks | yes (2026-11-03) |
+| MLA1002 | Televisores | yes (2026-11-03) |
+| MLA109027 | Zapatillas | yes (2026-11-03) |
+| MLA5726 | Electrodomésticos y Aires Ac. | yes (2026-11-03) |
+
+----|-------------------|----------|
 | MLA1055 | Cell phones (Celulares y Smartphones) | yes (probe) |
 | MLA1652 | Notebooks | to be validated |
 | MLA1002 | TVs (Televisores) | to be validated |

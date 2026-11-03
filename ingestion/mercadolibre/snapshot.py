@@ -5,14 +5,16 @@
 
 Environment: ``ML_CLIENT_ID``, ``ML_CLIENT_SECRET``, ``ML_REFRESH_TOKEN``.
 
-Output layout and fields: docs/DATA_CONTRACT.md section 1. The day's folder is replaced atomically,
-so re-running a date overwrites it. A ``failed`` run never replaces an existing usable snapshot.
+Output layout and fields: docs/DATA_CONTRACT.md section 1. The day's folder is replaced by rename,
+so re-running a date overwrites it, subject to the replacement rules in the contract (a run never
+replaces a better one: success > partial > failed).
 
 The refresh token rotates on every use (ADR-004): the new one is written to
 ``--new-refresh-token-file`` immediately after the refresh succeeds, before any data request.
 
-Exit codes: 0 success/partial · 1 failed · 2 config or token refresh error · 3 could not persist
-the new refresh token.
+Exit codes (see EXIT_* below and CLAUDE.md):
+  0 success or partial · 1 failed · 2 re-authorization required · 3 new refresh token not persisted
+  4 token endpoint unavailable after retries (transient) · 5 configuration error
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import os
 import shutil
 import sys
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -33,7 +36,12 @@ from typing import Any
 
 import httpx
 
-from ingestion.mercadolibre.auth import AuthError, ReauthorizationRequired, refresh_access_token
+from ingestion.mercadolibre.auth import (
+    AuthError,
+    ReauthorizationRequired,
+    TransientAuthError,
+    refresh_access_token,
+)
 from ingestion.mercadolibre.client import (
     API_BASE_URL,
     DEFAULT_DELAY_S,
@@ -42,19 +50,23 @@ from ingestion.mercadolibre.client import (
 )
 
 SITE_ID = "MLA"
-# MLA1055 (cell phones) is verified in docs/API_PROBE.md. The other four were picked for variety
-# and must be validated against /sites/MLA/categories in the first live run (DATA_CONTRACT §1).
+# All five verified live on 2026-11-03 (20 highlights each; docs/API_PROBE.md).
 DEFAULT_CATEGORIES = ("MLA1055", "MLA1652", "MLA1002", "MLA109027", "MLA5726")
 DEFAULT_MAX_REQUESTS = 1000
 DEFAULT_MAX_OFFERS_PER_PRODUCT = 100
-OFFERS_PAGE_SIZE = 50
+OFFERS_PAGE_SIZE = 50  # verified: limit=50 returns paging {limit: 50, offset, total}
 
 EXIT_OK = 0
 EXIT_FAILED = 1
-EXIT_AUTH = 2
+EXIT_REAUTHORIZE = 2
 EXIT_TOKEN_PERSIST = 3
+EXIT_TOKEN_TRANSIENT = 4
+EXIT_CONFIG = 5
 
 FILES = ("highlights", "products", "offers", "trends")
+FOLLOWED_TYPE = "PRODUCT"
+STATUS_RANK = {"failed": 0, "partial": 1, "success": 2}
+STORAGE_GITIGNORE_PATTERNS = (".tmp-*/", ".old-*/")
 
 logger = logging.getLogger(__name__)
 
@@ -68,36 +80,68 @@ def _now() -> str:
 
 
 # --------------------------------------------------------------------------- record mappers
-# Field sources follow DATA_CONTRACT §1. Fields not confirmed by docs/API_PROBE.md are read with
-# .get() and may be null.
+# Field sources follow DATA_CONTRACT §1. Every mapper tolerates malformed shapes: a value of the
+# wrong container type becomes null (scalars/objects) or [] (lists); it never raises.
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _str_list(value: Any) -> list[str]:
+    return [v for v in _list(value) if isinstance(v, str)]
 
 
 def _attribute(product: dict[str, Any], attr_id: str) -> str | None:
-    for attr in product.get("attributes") or []:
+    for attr in _list(product.get("attributes")):
         if isinstance(attr, dict) and attr.get("id") == attr_id:
-            return attr.get("value_name")
+            value = attr.get("value_name")
+            return value if isinstance(value, str) else None
     return None
 
 
-def map_highlights(category_id: str, payload: Any) -> list[dict[str, Any]]:
-    content = payload.get("content") if isinstance(payload, dict) else None
-    rows = []
-    for entry in content or []:
-        if not isinstance(entry, dict) or entry.get("type") != "PRODUCT" or not entry.get("id"):
+@dataclass
+class HighlightsResult:
+    rows: list[dict[str, Any]]
+    skipped: Counter[str]  # per-type count of entries not followed (and MALFORMED drops)
+
+
+def map_highlights(category_id: str, payload: Any) -> HighlightsResult:
+    """All ranked entries (any ``type``), deduplicated per (category, id)."""
+    rows: list[dict[str, Any]] = []
+    skipped: Counter[str] = Counter()
+    seen: set[str] = set()
+    for entry in _list(_dict(payload).get("content")):
+        entry_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(entry_id, str) or not entry_id:
+            skipped["MALFORMED"] += 1
             continue
+        if entry_id in seen:
+            continue
+        seen.add(entry_id)
+        entry_type = entry.get("type") if isinstance(entry.get("type"), str) else None
+        position = entry.get("position")
         rows.append(
             {
                 "category_id": category_id,
-                "position": entry.get("position"),
-                "product_id": entry["id"],
+                "position": position if isinstance(position, int) else None,
+                "product_id": entry_id,
+                "type": entry_type,
             }
         )
-    return rows
+        if entry_type != FOLLOWED_TYPE:
+            skipped[entry_type or "UNKNOWN"] += 1
+    return HighlightsResult(rows, skipped)
 
 
-def map_product(payload: dict[str, Any]) -> dict[str, Any]:
+def map_product(product_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    payload_id = payload.get("id")
     return {
-        "product_id": payload.get("id"),
+        "product_id": payload_id if isinstance(payload_id, str) else product_id,
         "name": payload.get("name"),
         "domain_id": payload.get("domain_id"),
         "family_name": payload.get("family_name"),
@@ -109,9 +153,8 @@ def map_product(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def map_offer(product_id: str, offer: dict[str, Any]) -> dict[str, Any]:
-    shipping = offer.get("shipping") or {}
-    seller_address = offer.get("seller_address") or {}
-    state = seller_address.get("state") if isinstance(seller_address, dict) else None
+    shipping = _dict(offer.get("shipping"))
+    state = _dict(_dict(offer.get("seller_address")).get("state"))
     return {
         "product_id": product_id,
         "item_id": offer.get("item_id"),
@@ -126,15 +169,15 @@ def map_offer(product_id: str, offer: dict[str, Any]) -> dict[str, Any]:
         "free_shipping": shipping.get("free_shipping"),
         "logistic_type": shipping.get("logistic_type"),
         "shipping_mode": shipping.get("mode"),
-        "deal_ids": offer.get("deal_ids") or [],
-        "tags": offer.get("tags") or [],
-        "seller_state": state.get("name") if isinstance(state, dict) else None,
+        "deal_ids": _str_list(offer.get("deal_ids")),
+        "tags": _str_list(offer.get("tags")),
+        "seller_state": state.get("name"),
     }
 
 
 def map_trends(payload: Any) -> list[dict[str, Any]]:
     rows = []
-    for index, entry in enumerate(payload if isinstance(payload, list) else [], start=1):
+    for index, entry in enumerate(_list(payload), start=1):
         if isinstance(entry, dict):
             rows.append(
                 {"position": index, "keyword": entry.get("keyword"), "url": entry.get("url")}
@@ -150,6 +193,8 @@ class Collected:
     run_id: str
     snapshot_date: str
     rows: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: {f: [] for f in FILES})
+    categories_captured: list[str] = field(default_factory=list)
+    skipped_highlights: Counter[str] = field(default_factory=Counter)
     cap_reached: bool = False
 
     def add(self, kind: str, records: Iterable[dict[str, Any]], captured_at: str) -> None:
@@ -161,30 +206,72 @@ class Collected:
         self.rows[kind].extend({**meta, **r} for r in records)
 
 
-def _fetch_offers(
-    client: MercadoLibreClient, product_id: str, max_offers: int
-) -> tuple[list[dict[str, Any]], str] | None:
-    """All offers of one catalog product, paginated, capped at ``max_offers``."""
+@dataclass
+class OffersResult:
+    offers: list[dict[str, Any]]
+    captured_at: str | None
+    cap_reached: bool = False
+
+
+def fetch_offers(client: MercadoLibreClient, product_id: str, max_offers: int) -> OffersResult:
+    """Offers of one catalog product: paginated, deduplicated by ``item_id``, capped.
+
+    Never requests ``offset >= paging.total`` (the API answers 404). A 404 on a later page is
+    treated as end of data. A failed later page keeps the offers already fetched. If the request
+    cap is hit mid-pagination, the offers fetched so far are kept and ``cap_reached`` is set.
+    """
     path = f"/products/{product_id}/items"
     offers: list[dict[str, Any]] = []
+    seen_items: set[Any] = set()
     captured_at: str | None = None
     offset = 0
-    while len(offers) < max_offers:
-        limit = min(OFFERS_PAGE_SIZE, max_offers - len(offers))
-        payload = client.get(path, params={"offset": offset, "limit": limit})
-        if not isinstance(payload, dict):
-            # First page failed: no offers for this product. Later page failed: keep what we have.
-            break
-        captured_at = captured_at or _now()
-        results = [r for r in (payload.get("results") or []) if isinstance(r, dict)]
-        offers.extend(results)
-        total = (payload.get("paging") or {}).get("total")
-        offset += len(results)
-        if not results or not isinstance(total, int) or offset >= total:
-            break
-    if captured_at is None:
-        return None
-    return offers[:max_offers], captured_at
+    total: int | None = None
+    try:
+        while len(offers) < max_offers and (total is None or offset < total):
+            limit = min(OFFERS_PAGE_SIZE, max_offers - len(offers))
+            payload = client.get(
+                path, params={"offset": offset, "limit": limit}, not_found_ok=offset > 0
+            )
+            if not isinstance(payload, dict):
+                if payload is not None:
+                    client.record_error(path, None)  # 200 with a non-object body
+                break
+            captured_at = captured_at or _now()
+            results = _list(payload.get("results"))
+            for offer in results:
+                if not isinstance(offer, dict):
+                    continue
+                item_id = offer.get("item_id")
+                if item_id is not None:
+                    if item_id in seen_items:
+                        continue
+                    seen_items.add(item_id)
+                offers.append(offer)
+            paging_total = _dict(payload.get("paging")).get("total")
+            total = paging_total if isinstance(paging_total, int) else None
+            offset += len(results)
+            if not results or total is None:  # empty page or no paging info: single page
+                break
+    except RequestCapReached:
+        return OffersResult(offers[:max_offers], captured_at, cap_reached=True)
+    return OffersResult(offers[:max_offers], captured_at)
+
+
+def _collect_product(
+    client: MercadoLibreClient, out: Collected, product_id: str, max_offers: int
+) -> None:
+    product_path = f"/products/{product_id}"
+    product = client.get(product_path)
+    if isinstance(product, dict):
+        out.add("products", [map_product(product_id, product)], _now())
+    elif product is not None:
+        client.record_error(product_path, None)  # 200 with a non-object body
+
+    result = fetch_offers(client, product_id, max_offers)
+    if result.captured_at is not None:
+        out.add("offers", (map_offer(product_id, o) for o in result.offers), result.captured_at)
+    if result.cap_reached:
+        raise RequestCapReached("request cap reached while paginating offers")
 
 
 def collect(
@@ -194,33 +281,63 @@ def collect(
     snapshot_date: str,
     max_offers_per_product: int = DEFAULT_MAX_OFFERS_PER_PRODUCT,
 ) -> Collected:
+    """Collect everything. Unexpected exceptions are contained per unit of work (trends, one
+    category's highlights, one product) and recorded as ``{path, status: null}``."""
     out = Collected(run_id=run_id, snapshot_date=snapshot_date)
     seen_products: set[str] = set()
-    try:
-        trends = client.get(f"/trends/{SITE_ID}")
-        if trends is not None:
-            out.add("trends", map_trends(trends), _now())
 
-        for category_id in categories:
-            payload = client.get(f"/highlights/{SITE_ID}/category/{category_id}")
-            if payload is None:
+    def contained(path: str, work: Callable[[], None]) -> None:
+        try:
+            work()
+        except RequestCapReached:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad unit must not kill the run
+            logger.warning("unexpected %s while handling %s; continuing", type(exc).__name__, path)
+            client.record_error(path, None)
+
+    def do_trends() -> None:
+        path = f"/trends/{SITE_ID}"
+        payload = client.get(path)
+        if isinstance(payload, list):
+            out.add("trends", map_trends(payload), _now())
+        elif payload is not None:
+            client.record_error(path, None)
+
+    def do_category(category_id: str) -> None:
+        path = f"/highlights/{SITE_ID}/category/{category_id}"
+        payload = client.get(path)
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            client.record_error(path, None)
+            return
+        result = map_highlights(category_id, payload)
+        out.add("highlights", result.rows, _now())
+        out.categories_captured.append(category_id)
+        out.skipped_highlights.update(result.skipped)
+        followed = [r["product_id"] for r in result.rows if r["type"] == FOLLOWED_TYPE]
+        logger.info(
+            "category %s: %d ranked entries, %d products followed",
+            category_id,
+            len(result.rows),
+            len(followed),
+        )
+        for product_id in followed:
+            if product_id in seen_products:
                 continue
-            highlights = map_highlights(category_id, payload)
-            out.add("highlights", highlights, _now())
-            logger.info("category %s: %d ranked products", category_id, len(highlights))
+            seen_products.add(product_id)
+            contained(
+                f"/products/{product_id}",
+                lambda pid=product_id: _collect_product(client, out, pid, max_offers_per_product),
+            )
 
-            for row in highlights:
-                product_id = row["product_id"]
-                if product_id in seen_products:
-                    continue
-                seen_products.add(product_id)
-                product = client.get(f"/products/{product_id}")
-                if isinstance(product, dict):
-                    out.add("products", [map_product(product)], _now())
-                fetched = _fetch_offers(client, product_id, max_offers_per_product)
-                if fetched is not None:
-                    offers, captured_at = fetched
-                    out.add("offers", (map_offer(product_id, o) for o in offers), captured_at)
+    try:
+        contained(f"/trends/{SITE_ID}", do_trends)
+        for category_id in categories:
+            contained(
+                f"/highlights/{SITE_ID}/category/{category_id}",
+                lambda cid=category_id: do_category(cid),
+            )
     except RequestCapReached:
         out.cap_reached = True
         logger.warning("request cap reached; writing what was collected so far")
@@ -228,7 +345,7 @@ def collect(
 
 
 def decide_status(collected: Collected, errors: list[dict[str, Any]]) -> str:
-    if not collected.rows["highlights"]:
+    if not collected.categories_captured:
         return "failed"
     if errors or collected.cap_reached:
         return "partial"
@@ -245,22 +362,67 @@ def _write_jsonl_gz(path: Path, rows: list[dict[str, Any]]) -> None:
             gz.write(b"\n")
 
 
-def _existing_is_usable(day_dir: Path) -> bool:
+def _existing_rank(day_dir: Path) -> int:
+    """Rank of the snapshot already on disk; -1 if absent or unreadable."""
     try:
         meta = json.loads((day_dir / "run.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return meta.get("status") in ("success", "partial")
+        return -1
+    return STATUS_RANK.get(meta.get("status") if isinstance(meta, dict) else None, -1)
+
+
+def ensure_storage_gitignore(out_root: Path) -> None:
+    """Make sure temp/backup folders can never be committed to the data repo."""
+    out_root.mkdir(parents=True, exist_ok=True)
+    path = out_root / ".gitignore"
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    missing = [p for p in STORAGE_GITIGNORE_PATTERNS if p not in existing]
+    if not missing:
+        return
+    header = [] if existing else ["# Snapshot job temp/backup folders (never commit)"]
+    lines = existing + header
+    path.write_text("\n".join(lines + missing) + "\n", encoding="utf-8")
+
+
+def cleanup_stale(out_root: Path) -> None:
+    """Remove leftovers of killed runs. A ``.old-<date>-<run>`` whose day folder is missing is the
+    only good copy (killed between the two renames), so it is restored instead of deleted."""
+    base = out_root / "mercadolibre"
+    if not base.is_dir():
+        return
+    for entry in sorted(base.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(".tmp-"):
+            logger.warning("removing stale temp folder %s", entry.name)
+            shutil.rmtree(entry, ignore_errors=True)
+        elif entry.name.startswith(".old-"):
+            day_dir = base / f"snapshot_date={entry.name[len('.old-') :][:10]}"
+            if day_dir.exists():
+                logger.warning("removing stale backup folder %s", entry.name)
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                logger.warning("restoring %s from stale backup %s", day_dir.name, entry.name)
+                entry.rename(day_dir)
 
 
 def write_snapshot(
     out_root: Path, snapshot_date: str, run_meta: dict[str, Any], collected: Collected
 ) -> Path | None:
-    """Write the day folder atomically. Returns the folder, or None if it was left untouched."""
+    """Write the day folder via temp folder + rename. Returns it, or None if left untouched.
+
+    Replacement rule: the new run replaces the existing folder only if its status ranks at least
+    as high (success > partial > failed).
+    """
     base = out_root / "mercadolibre"
     day_dir = base / f"snapshot_date={snapshot_date}"
-    if run_meta["status"] == "failed" and _existing_is_usable(day_dir):
-        logger.warning("run failed; keeping the existing usable snapshot for %s", snapshot_date)
+    existing = _existing_rank(day_dir)
+    if STATUS_RANK[run_meta["status"]] < existing:
+        logger.warning(
+            "run is %s; keeping the better existing snapshot for %s",
+            run_meta["status"],
+            snapshot_date,
+        )
         return None
 
     base.mkdir(parents=True, exist_ok=True)
@@ -273,19 +435,26 @@ def write_snapshot(
         (tmp_dir / "run.json").write_text(
             json.dumps(run_meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        # Directory renames are atomic on the same filesystem. os.replace cannot replace a
-        # non-empty directory, so move the old folder aside first, then swap in the new one.
-        if day_dir.exists():
-            day_dir.rename(old_dir)
-        try:
-            tmp_dir.rename(day_dir)
-        except OSError:
-            if old_dir.exists():
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)  # never the good copy
+        raise
+
+    # os.replace cannot replace a non-empty directory, so: move the old folder aside, move the new
+    # one in, and only then delete the old one. If killed between the renames, cleanup_stale()
+    # restores the backup on the next run.
+    if day_dir.exists():
+        day_dir.rename(old_dir)
+    try:
+        tmp_dir.rename(day_dir)
+    except OSError:
+        if old_dir.exists():
+            try:
                 old_dir.rename(day_dir)
-            raise
-    finally:
+            except OSError:
+                logger.critical("swap failed; previous snapshot kept at %s", old_dir.name)
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        shutil.rmtree(old_dir, ignore_errors=True)
+        raise
+    shutil.rmtree(old_dir, ignore_errors=True)
     return day_dir
 
 
@@ -325,15 +494,21 @@ def run(
 ) -> int:
     run_id = str(uuid.uuid4())
     started_at = _now()
+    sleep_kwargs: dict[str, Any] = {"sleep": sleep} if sleep is not None else {}
 
     try:
-        tokens = refresh_access_token(client_id, client_secret, refresh_token, http=http)
+        tokens = refresh_access_token(
+            client_id, client_secret, refresh_token, http=http, **sleep_kwargs
+        )
     except ReauthorizationRequired as exc:
         logger.error("%s", exc)
-        return EXIT_AUTH
+        return EXIT_REAUTHORIZE
+    except TransientAuthError as exc:
+        logger.error("token refresh failed transiently: %s; retry later, no re-auth needed", exc)
+        return EXIT_TOKEN_TRANSIENT
     except AuthError as exc:
-        logger.error("token refresh failed: %s", exc)
-        return EXIT_AUTH
+        logger.error("token refresh rejected: %s; check the app credentials or re-authorize", exc)
+        return EXIT_REAUTHORIZE
 
     # Persist the rotated token before anything else can fail (ADR-004).
     try:
@@ -343,41 +518,50 @@ def run(
         return EXIT_TOKEN_PERSIST
     logger.info("new refresh token persisted")
 
-    client_kwargs: dict[str, Any] = {
-        "base_url": base_url,
-        "delay_s": delay_s,
-        "max_requests": max_requests,
-        "http": http,
-    }
-    if sleep is not None:
-        client_kwargs["sleep"] = sleep
-    with MercadoLibreClient(tokens.access_token, **client_kwargs) as client:
-        collected = collect(client, categories, run_id, snapshot_date, max_offers_per_product)
-        errors = client.error_summary()
-        requests_made = client.requests_made
+    try:
+        ensure_storage_gitignore(out_root)
+        cleanup_stale(out_root)
+        with MercadoLibreClient(
+            tokens.access_token,
+            base_url=base_url,
+            delay_s=delay_s,
+            max_requests=max_requests,
+            http=http,
+            **sleep_kwargs,
+        ) as client:
+            collected = collect(client, categories, run_id, snapshot_date, max_offers_per_product)
+            errors = client.error_summary()
+            requests_made = client.requests_made
 
-    status = decide_status(collected, errors)
-    run_meta = {
-        "run_id": run_id,
-        "snapshot_date": snapshot_date,
-        "started_at": started_at,
-        "finished_at": _now(),
-        "site_id": SITE_ID,
-        "categories": list(categories),
-        "requests_made": requests_made,
-        "request_cap": max_requests,
-        "request_cap_reached": collected.cap_reached,
-        "row_counts": {kind: len(collected.rows[kind]) for kind in FILES},
-        "errors": errors,
-        "status": status,
-    }
-    write_snapshot(out_root, snapshot_date, run_meta, collected)
+        status = decide_status(collected, errors)
+        run_meta = {
+            "run_id": run_id,
+            "snapshot_date": snapshot_date,
+            "started_at": started_at,
+            "finished_at": _now(),
+            "site_id": SITE_ID,
+            "categories": collected.categories_captured,
+            "categories_requested": list(categories),
+            "requests_made": requests_made,
+            "request_cap": max_requests,
+            "request_cap_reached": collected.cap_reached,
+            "row_counts": {kind: len(collected.rows[kind]) for kind in FILES},
+            "skipped_highlights": dict(sorted(collected.skipped_highlights.items())),
+            "errors": errors,
+            "status": status,
+        }
+        write_snapshot(out_root, snapshot_date, run_meta, collected)
+    except Exception as exc:  # noqa: BLE001 - token is already safe; report and fail the run
+        logger.error("snapshot aborted by unexpected %s", type(exc).__name__)
+        return EXIT_FAILED
+
     logger.info(
-        "snapshot %s status=%s requests=%d rows=%s errors=%d",
+        "snapshot %s status=%s requests=%d rows=%s skipped=%s errors=%d",
         snapshot_date,
         status,
         requests_made,
         run_meta["row_counts"],
+        run_meta["skipped_highlights"],
         len(errors),
     )
     return EXIT_FAILED if status == "failed" else EXIT_OK
@@ -417,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if missing:
         logger.error("missing environment variables: %s", ", ".join(missing))
-        return EXIT_AUTH
+        return EXIT_CONFIG
     return run(
         out_root=args.out,
         snapshot_date=args.date or datetime.now(UTC).date().isoformat(),

@@ -39,3 +39,15 @@ price 255,999.36 ARS vs original 399,999 ARS, free shipping, `logistic_type=cros
 ## Not available
 
 Units sold / orders of other sellers. Ranking position is the demand proxy.
+
+## Follow-up checks — 2026-11-03 (orchestrator, live API)
+
+- **Categories:** all five snapshot defaults are valid and return 20 highlights each:
+  `MLA1055` Celulares y Smartphones · `MLA1652` Notebooks · `MLA1002` Televisores ·
+  `MLA109027` Zapatillas · `MLA5726` Electrodomésticos y Aires Ac.
+- **Highlights `content[].type`** can be `PRODUCT`, `USER_PRODUCT` or `ITEM`. Counts that day:
+  `MLA1055` = 19 PRODUCT / 1 USER_PRODUCT; `MLA109027` = 8 PRODUCT / 9 USER_PRODUCT / 3 ITEM.
+  Only `PRODUCT` ids can be followed (`/products/{id}`); the others would need blocked endpoints.
+- **`/products/{id}/items` paging:** `?limit=50&offset=0` → `paging {limit: 50, offset: 0, total: 42}`
+  with 42 results. `limit=10&offset=10` works. `limit=100` returns 200. An offset at or beyond
+  `total` returns **404** (so never request it; a 404 on a later page means end of data).

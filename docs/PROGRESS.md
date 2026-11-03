@@ -20,23 +20,26 @@ Files touched:
 
 ## Log
 
-### 2026-11-03 — data-engineer — 1.2 (branch `ingestion/ml-snapshot`, stacked on `ingestion/ml-oauth`)
-Done: `python -m ingestion.mercadolibre.snapshot`. Refreshes the token, writes the rotated refresh token
-to `--new-refresh-token-file` immediately (before any data call), then trends → highlights per category →
-product + paginated offers (page 50, cap 100/product) and writes `mercadolibre/snapshot_date=.../` per
-DATA_CONTRACT §1 via temp folder + rename. Products deduped across categories. Default request cap 1000.
-Contract updated: run.json gains `request_cap`, `request_cap_reached`, `row_counts`; error `status` may
-be null; `family_name`/`status`/`permalink` nullable (not in probe); writing rules and default categories.
-Not done / open: never run live. Four of the five default categories (MLA1652, MLA1002, MLA109027,
-MLA5726) are unverified guesses — check `run.json.errors` for 404s on the first live run and confirm
-against `/sites/MLA/categories`. `limit=50` on `/products/{id}/items` is assumed, not probed.
-Gotchas for the next agent (devops, 1.3): exit 0 = success/partial, 1 = failed, 2 = config/auth
-(owner must re-authorize on invalid_grant), 3 = new token not persisted. The token file is written even
-when the run later fails, so the workflow must save it as the secret on every exit code except 2
-(`if: always()` + file exists). Keep the token file outside the data repo checkout. A failed run never
-overwrites a usable snapshot of the same date.
-Files touched: ingestion/mercadolibre/snapshot.py, tests/mercadolibre/{ml_fixtures,test_snapshot}.py,
-docs/DATA_CONTRACT.md, CLAUDE.md, docs/PLAN.md, docs/PROGRESS.md
+### 2026-11-03 — data-engineer — 1.2 (PR #3, after review round 1)
+Done: `python -m ingestion.mercadolibre.snapshot`. Refreshes the token (transient 429/5xx/network
+failures retried with backoff), writes the rotated refresh token to `--new-refresh-token-file` before
+any data call, then trends → highlights per category (all types written, only PRODUCT followed) →
+product + paginated offers (page 50, cap 100/product, deduped by item_id, never offset >= total) and
+writes `mercadolibre/snapshot_date=.../` per DATA_CONTRACT §1 via temp folder + rename.
+Review fixes: malformed payloads and per-unit exceptions are contained and recorded as `{path, status:
+null}`; stale `.tmp-*`/`.old-*` cleaned (or restored) at start and git-ignored at the storage root;
+old folder deleted only after the swap succeeds; replacement rule success > partial > failed;
+`categories` = captured, new `categories_requested` and `skipped_highlights`; highlights gain `type`;
+offers fetched before hitting the cap are kept; client catches any `httpx.HTTPError` and records a
+200-with-null body; distinct exit codes (2 re-auth, 4 transient token failure, 5 config).
+All five default categories verified live by the orchestrator (docs/API_PROBE.md follow-up section).
+Not done / open: never run live from here; the first scheduled run is the real end-to-end test.
+Gotchas for the next agent (devops, 1.3): exit codes are in CLAUDE.md. The token file exists after
+exit 0 and 1 only: save it as the secret in those cases (`if: always()` + file exists check). Exit 4 =
+retry later, the old token is probably still valid; exit 2/3 = owner must re-authorize. Keep the token
+file outside the data repo checkout. The job writes `.gitignore` at `--out` (keep it committed).
+Files touched: ingestion/mercadolibre/{snapshot,auth,client,authorize}.py, tests/mercadolibre/**,
+docs/DATA_CONTRACT.md, docs/API_PROBE.md, CLAUDE.md, docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-03 — data-engineer — 1.1 (branch `ingestion/ml-oauth`)
 Done: `ingestion/mercadolibre/` package. `auth.py` refreshes with `grant_type=refresh_token` and returns

@@ -9,14 +9,16 @@ from __future__ import annotations
 import copy
 
 
-def highlights(product_ids: list[str], extra_items: int = 0) -> dict:
-    """``/highlights/MLA/category/{cat}``: ``content[]`` of ``{id, position, type}``."""
-    content = [
-        {"id": pid, "position": i, "type": "PRODUCT"} for i, pid in enumerate(product_ids, start=1)
-    ]
-    # Non-product entries must be ignored by the job.
-    for j in range(extra_items):
-        content.append({"id": f"MLA9{j:08d}", "position": len(content) + 1, "type": "ITEM"})
+def highlights(entries: list[str | tuple[str, str]]) -> dict:
+    """``/highlights/MLA/category/{cat}``: ``content[]`` of ``{id, position, type}``.
+
+    ``type`` is PRODUCT, USER_PRODUCT or ITEM (verified live 2026-11-03). A bare string entry is a
+    PRODUCT; pass ``(id, type)`` for the other types.
+    """
+    content = []
+    for position, entry in enumerate(entries, start=1):
+        entry_id, entry_type = (entry, "PRODUCT") if isinstance(entry, str) else entry
+        content.append({"id": entry_id, "position": position, "type": entry_type})
     return {"content": content}
 
 

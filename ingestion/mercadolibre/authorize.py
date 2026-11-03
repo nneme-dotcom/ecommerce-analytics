@@ -1,11 +1,22 @@
 """One-time interactive authorization for the Mercado Libre app (owner only).
 
-Run from the repo root (works on Windows with plain ``python``; needs only ``httpx``):
+Run from the repo root (works on Windows with plain ``python``; needs only ``httpx``).
 
-    set ML_CLIENT_ID=...           (PowerShell: $env:ML_CLIENT_ID="...")
+PowerShell:
+
+    $env:ML_CLIENT_ID="..."
+    $env:ML_CLIENT_SECRET="..."
+    $env:ML_REDIRECT_URI="https://www.google.com"
+    python -m ingestion.mercadolibre.authorize
+
+cmd.exe (no quotes around the values):
+
+    set ML_CLIENT_ID=...
     set ML_CLIENT_SECRET=...
     set ML_REDIRECT_URI=https://www.google.com
     python -m ingestion.mercadolibre.authorize
+
+macOS/Linux: ``export ML_CLIENT_ID=...`` etc., then the same ``python -m`` command.
 
 The app enforces PKCE (S256). This script generates a code_verifier/code_challenge, prints the
 authorization URL, asks you to paste the ``code`` from the redirect, exchanges it, and prints the

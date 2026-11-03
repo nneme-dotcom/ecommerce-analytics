@@ -8,6 +8,7 @@ from ingestion.mercadolibre.auth import (
     TOKEN_URL,
     AuthError,
     ReauthorizationRequired,
+    TransientAuthError,
     exchange_authorization_code,
     refresh_access_token,
 )
@@ -77,12 +78,18 @@ def test_invalid_grant_raises_reauthorization_required(status):
     assert excinfo.value.status == status
 
 
-def test_other_error_raises_auth_error_not_reauth():
-    with _client(lambda r: httpx.Response(500, text="oops")) as http:
-        with pytest.raises(AuthError) as excinfo:
-            refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http)
-    assert not isinstance(excinfo.value, ReauthorizationRequired)
-    assert excinfo.value.status == 500
+def test_non_transient_error_raises_auth_error_without_retry():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(403, json={"error": "forbidden"})
+
+    with _client(handler) as http, pytest.raises(AuthError) as excinfo:
+        refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http, sleep=lambda s: None)
+    assert not isinstance(excinfo.value, (ReauthorizationRequired, TransientAuthError))
+    assert excinfo.value.status == 403
+    assert len(calls) == 1
 
 
 def test_missing_refresh_token_in_response_is_an_error():
@@ -91,12 +98,61 @@ def test_missing_refresh_token_in_response_is_an_error():
             refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http)
 
 
-def test_transport_error_is_wrapped():
-    def handler(request):
-        raise httpx.ConnectTimeout("timed out", request=request)
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_transient_status_is_retried_then_succeeds(status):
+    responses = [
+        httpx.Response(status),
+        httpx.Response(status),
+        httpx.Response(200, json={"access_token": ACCESS, "refresh_token": NEW_REFRESH}),
+    ]
+    sleeps = []
+    with _client(lambda r: responses.pop(0)) as http:
+        tokens = refresh_access_token(
+            "app-id", SECRET, OLD_REFRESH, http=http, backoff_base_s=1.0, sleep=sleeps.append
+        )
+    assert tokens.refresh_token == NEW_REFRESH
+    assert sleeps == [1.0, 2.0]
 
-    with _client(handler) as http, pytest.raises(AuthError):
-        refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http)
+
+def test_transient_failure_after_retries_raises_transient_auth_error():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(502, text="bad gateway")
+
+    with _client(handler) as http, pytest.raises(TransientAuthError) as excinfo:
+        refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http, sleep=lambda s: None)
+    assert excinfo.value.status == 502
+    assert len(calls) == 4  # 1 try + 3 retries
+
+
+@pytest.mark.parametrize(
+    "exc", [httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError]
+)
+def test_network_errors_are_retried_and_wrapped(exc):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise exc("network down", request=request)
+
+    with _client(handler) as http, pytest.raises(TransientAuthError) as excinfo:
+        refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http, sleep=lambda s: None)
+    assert excinfo.value.status is None
+    assert len(calls) == 4
+
+
+def test_invalid_grant_is_not_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    with _client(handler) as http, pytest.raises(ReauthorizationRequired):
+        refresh_access_token("app-id", SECRET, OLD_REFRESH, http=http, sleep=lambda s: None)
+    assert len(calls) == 1
 
 
 def test_authorization_code_exchange_sends_pkce_verifier():
