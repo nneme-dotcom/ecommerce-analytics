@@ -5,8 +5,8 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 1 — Data in
-- **Next up:** merge 1.3 and watch the first scheduled runs (acceptance: 3 consecutive successful days); 1.4 / 1.5
-- **Blockers:** owner must create the repo secrets `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`, `DATA_REPO_PAT` before the scheduled job can run.
+- **Next up:** watch the daily runs — 1.3 needs 3 consecutive daily successes (1 of 3 so far: run 41729877814); then 1.4 / 1.5.
+- **Blockers:** none.
 
 ## Handoff template
 
@@ -19,6 +19,18 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-03 — orchestrator — 1.3 first live run
+Done: first real snapshot (run 41729877814): `success`, 195 requests, 100 highlights, 87 products,
+2,313 offers, 50 trends, 0 errors; skipped highlights ITEM 3 / USER_PRODUCT 10. Rotated refresh token
+saved to `ML_REFRESH_TOKEN`; day folder pushed to the private data repo.
+Not done / open: 2 more consecutive daily successes before 1.3 can be marked done.
+Gotchas: the first two runs failed with exit 2 (`invalid_grant`), most likely because the stored
+refresh token had been issued while authorizing with the pre-renewal client secret. Re-authorizing
+with the new secret fixed it (see docs/API_PROBE.md "Token behaviour"). Run `Check secrets` before
+spending a refresh token (it validates the client credentials, not the stored refresh token; after a
+client secret renewal, re-authorize regardless).
+Files touched: docs/PROGRESS.md, docs/API_PROBE.md
 
 ### 2026-11-03 — orchestrator — pre-flight for 1.3 (PR #4)
 Done: manual `Check secrets` workflow. Proves, without printing values or spending the refresh token:
