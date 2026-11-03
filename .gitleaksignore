@@ -3,3 +3,5 @@
 
 # Fake refresh token used as a test fixture in tests/test_check_secrets.py (PR #4, first commit).
 0a9f67330a116071bb6757cc6516a17772259927:tests/test_check_secrets.py:generic-api-key:10
+# Same fixture after PR #4 was rebased onto main (new commit id).
+9491be4a0fd7a6e766ac3694f853797561691849:tests/test_check_secrets.py:generic-api-key:10

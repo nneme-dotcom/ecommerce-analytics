@@ -86,6 +86,7 @@ Filled in as each area is built. Keep this section accurate.
 | ML daily snapshot (env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`) | `python -m ingestion.mercadolibre.snapshot --out <storage-root> --new-refresh-token-file <path> [--date YYYY-MM-DD] [--categories ...]` |
 | Trigger the scheduled ML snapshot manually (runs daily at 05:23 UTC; main only) | `gh workflow run ml-daily-snapshot.yml --ref main` (watch: `gh run watch`) |
 | Render a run's job summary / exit-code message locally | `python scripts/summarize_run.py summary --run-json <path>/run.json --exit-code <code>` · `python scripts/summarize_run.py check --exit-code <code>` |
+| Check the Actions secrets (manual, never prints values, never spends the refresh token) | Actions tab → *Check secrets* → Run workflow, or `gh workflow run check-secrets.yml --ref main` |
 
 Snapshot exit codes (ADR-008; the scheduled workflow branches on these):
 

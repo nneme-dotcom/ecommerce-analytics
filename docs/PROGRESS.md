@@ -20,6 +20,16 @@ Files touched:
 
 ## Log
 
+### 2026-11-03 — orchestrator — pre-flight for 1.3 (PR #4)
+Done: manual `Check secrets` workflow. Proves, without printing values or spending the refresh token:
+secrets present/well-formed; ML client id/secret accepted (fake refresh token → `invalid_grant` = valid
+client, `invalid_client` = wrong secret; verified live); data repo is private; PAT can write Actions
+secrets (writes and deletes a throwaway `CHECK_SECRETS_PROBE`); PAT can push to the data repo
+(`git push --dry-run`, auth via env-provided header, never in URL/argv).
+Gotchas: checkout must use `persist-credentials: false`, otherwise GITHUB_TOKEN shadows the PAT.
+ADR-010 records the owner's accepted risks (single PAT, no Environment).
+Files touched: .github/workflows/check-secrets.yml, scripts/check_secrets.py, tests/test_check_secrets.py, docs/DECISIONS.md, CLAUDE.md
+
 ### 2026-11-03 — devops — 1.3 (branch `devops/ml-daily-snapshot`)
 Done: `.github/workflows/ml-daily-snapshot.yml`: daily at 05:23 UTC + `workflow_dispatch`, main only,
 `permissions: contents: read`, job-level `concurrency` group keyed by ref, no cancel-in-progress, job
