@@ -6,9 +6,9 @@ from scripts import check_secrets as cs
 
 GOOD = {
     "ML_CLIENT_ID": "1234567890123456",
-    "ML_CLIENT_SECRET": "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
-    "ML_REFRESH_TOKEN": "TG-0123456789abcdef-123456",
-    "DATA_REPO_PAT": "github_pat_" + "A" * 40,
+    "ML_CLIENT_SECRET": "fakeclientsecretfortests",
+    "ML_REFRESH_TOKEN": "TG-fake-refresh-token-for-tests",
+    "DATA_REPO_PAT": "github_pat_" + "x" * 40,
 }
 
 

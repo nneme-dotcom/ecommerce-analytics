@@ -147,7 +147,11 @@ def check_data_repo_private(env: dict[str, str], http: httpx.Client) -> Result:
         return Result(name, False, f"network error: {type(exc).__name__}")
     if resp.status_code != 200:
         return Result(name, False, f"HTTP {resp.status_code}: give the PAT access to this repo")
-    if resp.json().get("private") is not True:
+    try:
+        private = resp.json().get("private")
+    except (ValueError, AttributeError):
+        return Result(name, False, "unexpected response from the GitHub API")
+    if private is not True:
         return Result(name, False, "the data repo is PUBLIC: make it private (ADR-003)")
     return Result(name, True, "private")
 
