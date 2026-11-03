@@ -118,3 +118,19 @@ after an interrupted folder swap could delete a good day from the data repo.
 
 **Consequences.** If the data contract ever renames or drops a snapshot file, the deletion guard
 will refuse the first re-run of an existing day; update the guard in the same PR as the contract.
+
+## ADR-010 — Accepted risks: one PAT, no GitHub Environment (2026-11-03)
+
+**Context.** The review of PRs #4/#5 flagged two hardening gaps:
+- A fine-grained PAT applies the same permissions to every repo it selects, so `DATA_REPO_PAT`
+  (Contents RW for the data repo + Secrets RW for this repo) also has Contents RW on this **public** repo.
+- `workflow_dispatch` runs the workflow file from any branch with repo secrets available, so the
+  "main only" guard is a convention, not a control.
+
+**Decision (owner).** Accept both for now: a single PAT, and repo-level secrets without a
+GitHub Environment. The owner is the only contributor.
+
+**Consequences.** If the PAT leaked, it could also push to the public repo. Revisit before
+adding collaborators or making the project a team effort: split into two PATs (or a GitHub App)
+and move the secrets into an Environment restricted to `main`. Supersedes ADR-003's
+"PAT scoped to that repo only" wording.
