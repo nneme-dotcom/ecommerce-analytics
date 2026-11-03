@@ -56,8 +56,9 @@ Units sold / orders of other sellers. Ranking position is the demand proxy.
 
 - **Refresh works for this PKCE app** with only `grant_type=refresh_token`, `client_id`,
   `client_secret`, `refresh_token` (no `code_verifier`). Each refresh returns a new refresh token.
-- **The previous refresh token kept working right after a rotation** (a reuse returned 200).
-  Don't rely on this grace: always persist the newest token (ADR-004).
+- **Observed once, not documented (window unknown):** the previous refresh token kept working right
+  after a rotation (one reuse returned 200). Don't rely on it. ADR-004/ADR-008 still treat the
+  refresh token as single-use: always persist the newest token, and exit 3 still means re-authorize.
 - **A refresh token issued while authorizing with one client secret was rejected (`invalid_grant`)
   when refreshed with a renewed client secret**, even though both secrets were accepted by the token
   endpoint (old one still in its renewal grace period). Observed, not documented by Mercado Libre.
