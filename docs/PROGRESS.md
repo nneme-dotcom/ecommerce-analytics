@@ -28,7 +28,8 @@ Not done / open: 2 more consecutive daily successes before 1.3 can be marked don
 Gotchas: the first two runs failed with exit 2 (`invalid_grant`), most likely because the stored
 refresh token had been issued while authorizing with the pre-renewal client secret. Re-authorizing
 with the new secret fixed it (see docs/API_PROBE.md "Token behaviour"). Run `Check secrets` before
-spending a refresh token.
+spending a refresh token (it validates the client credentials, not the stored refresh token; after a
+client secret renewal, re-authorize regardless).
 Files touched: docs/PROGRESS.md, docs/API_PROBE.md
 
 ### 2026-11-03 — orchestrator — pre-flight for 1.3 (PR #4)
