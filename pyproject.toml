@@ -1,0 +1,18 @@
+[project]
+name = "ecommerce-analytics"
+version = "0.1.0"
+description = "Marketplace intelligence: Olist business analytics + Mercado Libre price intelligence"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]  # S = bandit security checks
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert is fine in tests
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,81 @@
+# CLAUDE.md — read this first
+
+This file is the entry point for every agent (and human) working on this repo.
+Agents start with no memory: **everything you need to know lives in this file and in `docs/`.**
+
+## What this project is
+
+**ecommerce-analytics** is a portfolio project that combines two data sources into one
+marketplace-intelligence platform:
+
+1. **Business performance (historical)** — the public Olist Brazilian e-commerce dataset
+   (~100k orders, 2016–2018): orders, items, payments, deliveries, reviews, sellers.
+2. **Competitive pricing (live)** — daily snapshots from the official Mercado Libre API
+   (Argentina, site `MLA`): best sellers per category, catalog products and **every offer**
+   on each product (price, original price, seller, shipping, logistics, official store).
+
+Story: *"How does a marketplace perform, and how do sellers compete on price and delivery?"*
+
+Target audience: reviewers for Amazon internships (BI Engineer, SDE, TPM, Business Analyst).
+That means: rigorous SQL, clean pipelines, tests, CI, and analyses that answer **business questions**,
+not analyses for their own sake.
+
+## Session start checklist (every agent, every time)
+
+1. Read `docs/PROGRESS.md` (current state + latest handoff).
+2. Read `docs/PLAN.md` and find the task you were assigned.
+3. Read `docs/DATA_CONTRACT.md` before touching any schema, table, file layout or API payload.
+4. Skim `docs/DECISIONS.md` so you don't re-open settled questions.
+
+## Session end checklist
+
+1. Append a handoff entry to `docs/PROGRESS.md` (template inside that file).
+2. If you made a non-trivial technical choice, add an entry to `docs/DECISIONS.md`.
+3. If you changed a schema or payload, update `docs/DATA_CONTRACT.md` **in the same PR**.
+
+## Golden rules (non-negotiable)
+
+- **Secrets never enter the repo.** No client secret, access token, refresh token or PAT in code,
+  config, tests, fixtures, logs, commit messages or PR text. Read them from environment variables /
+  GitHub Actions secrets. `.env` and `*.tokens.json` are git-ignored.
+- **Tokens go in the `Authorization: Bearer` header, never in a URL query string.**
+- **Never log token values.** Log only status codes, endpoint paths and counts.
+- **Raw Mercado Libre data is not committed to this public repo** (see DECISIONS ADR-003).
+  Aggregated, analysis-level outputs are fine.
+- **The data contract is the source of truth.** Don't invent column names; if you need a new one,
+  change the contract first.
+- **Small PRs, one task each.** Branch name: `<area>/<short-task>` (e.g. `ingestion/ml-snapshot`).
+- **Every PR passes CI and is reviewed by the `reviewer` agent before merge.** Agents never review their own work.
+- Write code, comments, docs and commit messages in **English**.
+
+## Mercado Libre API — facts verified on 2026-11-03 (see docs/API_PROBE.md)
+
+- OAuth 2.0 **authorization code + PKCE (S256)** + refresh token. Access token lives 6 h.
+  **The refresh token rotates on every use: always persist the new one.**
+- Working: `/sites/MLA/categories`, `/categories/{id}`, `/highlights/MLA/category/{cat}`,
+  `/products/search`, `/products/{id}`, `/products/{id}/items`, `/trends/MLA`.
+- Blocked (403, do not build on them): `/sites/MLA/search`, `/items/{id}`, `/items/{id}/prices`.
+- There is **no sales/units data**. Ranking position in best sellers is our demand proxy.
+- Be polite: sequential requests, small delay, retry with backoff on 429/5xx, hard cap per run.
+
+## Repo map
+
+```
+ingestion/mercadolibre/   Python: OAuth, daily snapshot job
+ingestion/olist/          Python: download + load Olist CSVs
+warehouse/                SQL: staging → star schema → marts (PostgreSQL)
+api/                      Backend serving metrics to the dashboard
+dashboard/                React + TypeScript dashboard
+docs/                     Project memory (plan, contract, decisions, progress)
+.claude/agents/           Agent role definitions for this repo
+.github/workflows/        CI and scheduled jobs
+```
+
+## Commands
+
+Filled in as each area is built. Keep this section accurate.
+
+| Task | Command |
+|------|---------|
+| Lint Python | `ruff check .` |
+| Test Python | `pytest` |
