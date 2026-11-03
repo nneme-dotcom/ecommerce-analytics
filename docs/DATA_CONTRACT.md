@@ -133,9 +133,78 @@ All five verified live on 2026-11-03 (each returned 20 highlights; see docs/API_
 
 ## 2. Olist raw — `draft`
 
-The nine CSVs of the public dataset, loaded unchanged into schema `raw_olist`:
-customers, geolocation, order_items, order_payments, order_reviews, orders, products, sellers,
-product_category_name_translation.
+Source: the Kaggle dataset `olistbr/brazilian-ecommerce` ("Brazilian E-Commerce Public Dataset by
+Olist"), licensed CC BY-NC-SA 4.0 per the Kaggle page. Raw CSVs are never committed (`data/` is
+git-ignored); attribution is in the README.
+
+Headers and record counts below were **verified on 2026-11-03** against the official Kaggle archive
+(`archive.zip`, 44,717,580 bytes) by a full local load. The loader refuses a file whose header
+differs and prints the header it found; if the upstream files ever change, update this table and
+`ingestion/olist/files.py` in the same PR. CI uses synthetic fixtures with the same headers
+(`tests/olist/fixtures/`); `tests/olist/test_olist_real_data.py` checks the real counts when
+`OLIST_SOURCE_DIR` is set.
+
+### Files on disk (task 1.4, `python -m ingestion.olist.download`)
+
+```
+data/olist/                          (default --dest; git-ignored)
+  <the nine CSVs below>              extracted unchanged from the archive
+  manifest.json                      {dataset, source: "kaggle-api"|"zip", archive_sha256,
+                                      created_at, files: {<csv name>: {sha256, bytes}}}
+```
+
+The archive must contain **exactly** the nine CSVs, at its root (anything else, missing or duplicated
+entries → refused, nothing written). Files are moved into place only after all of them extracted
+with a valid CRC; `manifest.json` is written last.
+
+### Schema `raw_olist` (task 1.4, `python -m ingestion.olist.load`)
+
+Rules:
+- One table per CSV, named below. **Every column is `text`**, named exactly as the CSV header and in
+  the same order (upstream typos kept). No keys,
+  no constraints, no type casts: typing, renaming and dedup happen in `staging` (task 2.1).
+- Values are loaded unchanged with `COPY ... (FORMAT csv, HEADER)`: an **unquoted empty field is
+  NULL**, a quoted empty string (`""`) is `''`. Multi-line quoted values (review comments) keep their
+  line breaks (`\r\n` included). A UTF-8 byte-order mark before the header is tolerated.
+- Row count of each table = number of CSV **records** (parsed as CSV, header excluded), checked
+  inside the load; a mismatch aborts.
+- Idempotent: the whole load (nine tables + audit rows) is one transaction. Each table is
+  truncated and reloaded; if its columns no longer match this contract it is dropped and re-created
+  (no `CASCADE`: a dependent view makes the load fail rather than silently disappear).
+
+| table | file | columns | rows (verified) |
+|-------|------|---------|----------------|
+| customers | olist_customers_dataset.csv | customer_id, customer_unique_id, customer_zip_code_prefix, customer_city, customer_state | 99,441 |
+| geolocation | olist_geolocation_dataset.csv | geolocation_zip_code_prefix, geolocation_lat, geolocation_lng, geolocation_city, geolocation_state | 1,000,163 |
+| order_items | olist_order_items_dataset.csv | order_id, order_item_id, product_id, seller_id, shipping_limit_date, price, freight_value | 112,650 |
+| order_payments | olist_order_payments_dataset.csv | order_id, payment_sequential, payment_type, payment_installments, payment_value | 103,886 |
+| order_reviews | olist_order_reviews_dataset.csv | review_id, order_id, review_score, review_comment_title, review_comment_message, review_creation_date, review_answer_timestamp | 99,224 |
+| orders | olist_orders_dataset.csv | order_id, customer_id, order_status, order_purchase_timestamp, order_approved_at, order_delivered_carrier_date, order_delivered_customer_date, order_estimated_delivery_date | 99,441 |
+| products | olist_products_dataset.csv | product_id, product_category_name, product_name_lenght, product_description_lenght, product_photos_qty, product_weight_g, product_length_cm, product_height_cm, product_width_cm | 32,951 |
+| sellers | olist_sellers_dataset.csv | seller_id, seller_zip_code_prefix, seller_city, seller_state | 3,095 |
+| product_category_name_translation | product_category_name_translation.csv | product_category_name, product_category_name_english | 71 |
+
+Upstream quirks kept verbatim in raw (rename/handle in `staging`):
+`product_category_name_translation.csv` starts with a UTF-8 BOM (stripped from the column name);
+`products` has the typos `product_name_lenght` / `product_description_lenght` (rename to `*_length`
+in staging); 3,852 review messages contain line breaks.
+
+Other known quirks for `staging` (from the dataset description, not yet checked): `geolocation` has many
+rows per zip prefix and is not unique; `order_reviews.review_id` is not unique on its own;
+`customer_id` is per order, `customer_unique_id` is the person.
+
+### `raw_olist._load_audit` (append-only, one row per table per load)
+
+| column | type | notes |
+|--------|------|-------|
+| load_id | uuid | one per `load` run; PK is (`load_id`, `table_name`) |
+| table_name | text | e.g. `orders` |
+| source_file | text | CSV file name (no path) |
+| row_count | bigint | rows loaded (= CSV records) |
+| file_sha256 | char(64) | SHA-256 of the CSV loaded |
+| loaded_at | timestamptz | transaction time (same for all tables of a load) |
+
+Latest load per table: `SELECT DISTINCT ON (table_name) * FROM raw_olist._load_audit ORDER BY table_name, loaded_at DESC`.
 
 ---
 

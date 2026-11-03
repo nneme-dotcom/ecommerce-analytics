@@ -1,3 +1,4 @@
 # Runtime dependencies (mirrors [project].dependencies in pyproject.toml).
 # Install: pip install -r requirements.txt
 httpx>=0.27,<1
+psycopg[binary]>=3.2,<4
