@@ -20,6 +20,11 @@ Files touched:
 
 ## Log
 
+### 2026-11-03 — devops — 0.3 (PR #1)
+Done: secret scan now runs the gitleaks CLI (checksum-verified) over the full history; actions moved to Node 24 versions.
+Gotchas: `gitleaks/gitleaks-action@v2` fails on the first push of a new repo (it diffs `<root>^..<head>`; the root has no parent). Don't switch back to it.
+Files touched: .github/workflows/ci.yml
+
 ### 2026-11-03 — orchestrator — 0.1, 0.2, 0.3
 Done: repo scaffold, project memory docs, agent role definitions, CI workflow.
 Verified the Mercado Libre API by hand (see docs/API_PROBE.md): auth works with PKCE; catalog,
