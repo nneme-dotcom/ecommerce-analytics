@@ -4,9 +4,9 @@ Current state at the top; handoff log below (newest first).
 
 ## Current state
 
-- **Phase:** 0 — Foundations
-- **Next up:** 1.1 / 1.2 / 1.3 (start the ML history ASAP)
-- **Blockers:** owner must rotate the ML client secret and create a fine-grained PAT before the scheduled job can run.
+- **Phase:** 1 — Data in
+- **Next up:** merge 1.3 and watch the first scheduled runs (acceptance: 3 consecutive successful days); 1.4 / 1.5
+- **Blockers:** owner must create the repo secrets `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`, `DATA_REPO_PAT` before the scheduled job can run.
 
 ## Handoff template
 
@@ -19,6 +19,35 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-03 — devops — 1.3 (branch `devops/ml-daily-snapshot`)
+Done: `.github/workflows/ml-daily-snapshot.yml`: daily at 05:23 UTC + `workflow_dispatch`, main only,
+`permissions: contents: read`, job-level `concurrency` group keyed by ref, no cancel-in-progress, job
+timeout 50 min (snapshot step 40 min). Checks out both repos with `persist-credentials: false` (data
+repo into `data/` via `DATA_REPO_PAT`; push auth only in the push step, via env-only git config), runs the
+snapshot with `--out data --date <UTC today> --new-refresh-token-file $RUNNER_TEMP/ml_refresh_token`,
+captures the exit code as a step output. Token step (`always()`, the only one): saves the file to
+`ML_REFRESH_TOKEN` via `gh secret set` (3 attempts, value masked, file shredded) only if it exists.
+Commit step: only on exit 0/1 reported by the step, only if the day's `run.json` exists, refuses
+commits that delete tracked files (`--no-renames`, so a deleted day can't pass as a rename), skips when
+nothing changed; bot identity exported for the whole step (commit and rebase-retry); message `snapshot YYYY-MM-DD (status)`.
+Last step fails the job with a human message per exit code. `scripts/summarize_run.py` (stdlib only)
+writes the `$GITHUB_STEP_SUMMARY` table (counts only) and `::warning::` annotations (no offers for any
+followed product / offers 0 with products > 0, partial, request cap reached); 19 new tests (113 total).
+ADR-009 records the step conditions and the commit guard. actionlint 1.7.7 + shellcheck clean;
+token and commit steps dry-run locally against a stub `gh` and a scratch git remote.
+Review round 1 (PR #5): deletion guard made rename-proof, identity for the rebase retry, concurrency
+moved to the job and keyed by ref, data checkout no longer persists the PAT.
+Not done / open: never run on GitHub (needs the secrets). PLAN 1.3 stays `in review` at merge; its
+acceptance (3 consecutive successful daily runs) is checked after merge. The single broad PAT and the
+lack of a GitHub Environment are owner-accepted risks (ADR-010, separate PR).
+Gotchas for the next agent: the workflow only becomes dispatchable once it is on `main`. If the data
+contract adds/renames/drops a snapshot file, update the deletion guard in the commit step (ADR-009).
+`scripts/` is imported in tests as `scripts.summarize_run` (namespace package via `pythonpath`);
+don't add a `tests/scripts/` package (name clash).
+Files touched: .github/workflows/ml-daily-snapshot.yml, scripts/summarize_run.py,
+tests/test_summarize_run.py, CLAUDE.md (Commands rows, applied by the orchestrator), docs/DECISIONS.md,
+docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-03 — data-engineer — 1.2 (PR #3, after review round 2)
 Done: `python -m ingestion.mercadolibre.snapshot`. Refreshes the token (transient 429/5xx/network

@@ -1,0 +1,189 @@
+name: ML daily snapshot
+
+# Daily Mercado Libre snapshot (PLAN 1.3). Raw data is pushed to the PRIVATE repo
+# nneme-dotcom/ecommerce-analytics-data (ADR-003); the rotated refresh token is written back to the
+# ML_REFRESH_TOKEN secret at the end of every run that produced one (ADR-004). Exit codes: ADR-008.
+# Step conditions and the commit guard are explained in ADR-009.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"  # 05:23 UTC daily (off the hour to avoid the top-of-hour queue)
+  workflow_dispatch:
+
+# GITHUB_TOKEN only reads this repo. Every write (data repo push, secret update) goes through
+# DATA_REPO_PAT, a single fine-grained PAT with Contents RW on both repos and Secrets RW on this one.
+# That PAT is broader than this job needs and no GitHub Environment gates it: owner-accepted risk,
+# see ADR-010. It is handed only to the steps that need it, never persisted in git config.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash  # bash -eo pipefail
+
+jobs:
+  snapshot:
+    name: Snapshot and persist token
+    # Every run consumes the single-use refresh token, so only code on main may run it.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    # Never two runs at once: one run's stale-folder cleanup can break another run's swap, and two
+    # runs would race on the single-use refresh token. A running job is never cancelled, but GitHub
+    # keeps only ONE pending job per group and cancels any older pending one. The ref is part of the
+    # group so a dispatch from another ref can never displace a pending main run (non-main runs are
+    # skipped by the `if:` above anyway).
+    concurrency:
+      group: ml-daily-snapshot-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      DATA_REPO: nneme-dotcom/ecommerce-analytics-data
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check out the data repo into data/
+        uses: actions/checkout@v5
+        with:
+          repository: nneme-dotcom/ecommerce-analytics-data
+          ref: main
+          path: data
+          token: ${{ secrets.DATA_REPO_PAT }}
+          # Read-only use here; push credentials are supplied only in the push step.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pick the snapshot date (UTC)
+        id: date
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      # Never fails: the exit code is exported and the later steps branch on it.
+      # Step timeout < job timeout so the token step still gets to run if this one hangs.
+      - name: Run snapshot
+        id: snapshot
+        timeout-minutes: 40
+        env:
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SNAPSHOT_DATE: ${{ steps.date.outputs.date }}
+        run: |
+          # The token file lives in RUNNER_TEMP, outside both checkouts.
+          set +e
+          python -m ingestion.mercadolibre.snapshot \
+            --out data \
+            --date "$SNAPSHOT_DATE" \
+            --new-refresh-token-file "$RUNNER_TEMP/ml_refresh_token"
+          code=$?
+          set -e
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          echo "Snapshot exited with code ${code}"
+
+      # The only always() step: if a rotated token was written (even by a killed or timed-out run),
+      # it must reach the secret, or the next run fails with invalid_grant (ADR-004).
+      - name: Save rotated refresh token
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          TOKEN_FILE="$RUNNER_TEMP/ml_refresh_token"
+          cleanup() {
+            for f in "$TOKEN_FILE" "$TOKEN_FILE.tmp"; do
+              [ -e "$f" ] && { shred -u "$f" 2>/dev/null || rm -f "$f"; }
+            done
+            return 0
+          }
+          trap cleanup EXIT
+          if [ ! -s "$TOKEN_FILE" ]; then
+            echo "No rotated refresh token was written; ML_REFRESH_TOKEN left unchanged."
+            exit 0
+          fi
+          echo "::add-mask::$(tr -d '\r\n' < "$TOKEN_FILE")"
+          # Retry transient GitHub API errors: losing this token means a manual re-authorization.
+          saved=""
+          for attempt in 1 2 3; do
+            if tr -d '\r\n' < "$TOKEN_FILE" | gh secret set ML_REFRESH_TOKEN -R "$REPO"; then
+              saved=yes
+              break
+            fi
+            echo "gh secret set failed (attempt ${attempt}/3)"
+            [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
+          done
+          if [ -z "$saved" ]; then
+            echo "::error title=Refresh token NOT saved::The rotated refresh token could not be written to ML_REFRESH_TOKEN (check DATA_REPO_PAT: Secrets read/write on ${REPO}). The old token is consumed: run python -m ingestion.mercadolibre.authorize and update the secret."
+            exit 1
+          fi
+          echo "Rotated refresh token saved to ML_REFRESH_TOKEN."
+
+      - name: Write job summary
+        if: ${{ !cancelled() }}
+        env:
+          SNAPSHOT_DATE: ${{ steps.date.outputs.date }}
+          EXIT_CODE: ${{ steps.snapshot.outputs.exit_code }}
+        run: |
+          python scripts/summarize_run.py summary \
+            --run-json "data/mercadolibre/snapshot_date=${SNAPSHOT_DATE}/run.json" \
+            --exit-code "$EXIT_CODE"
+
+      # Data is committed only when the snapshot step itself finished with 0 or 1 (ADR-008) and the
+      # day folder has a run.json. Runs even if the token step failed: the data is still valid.
+      - name: Commit and push snapshot to the data repo
+        if: >-
+          !cancelled() &&
+          (steps.snapshot.outputs.exit_code == '0' || steps.snapshot.outputs.exit_code == '1')
+        env:
+          SNAPSHOT_DATE: ${{ steps.date.outputs.date }}
+          DATA_REPO_PAT: ${{ secrets.DATA_REPO_PAT }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        working-directory: data
+        run: |
+          day="mercadolibre/snapshot_date=${SNAPSHOT_DATE}"
+          if [ ! -f "${day}/run.json" ]; then
+            echo "No ${day}/run.json; nothing to commit."
+            exit 0
+          fi
+          git add -A -- .gitignore mercadolibre
+          if git diff --cached --quiet; then
+            echo "No changes (an equal or better snapshot already existed, ADR-007)."
+            exit 0
+          fi
+          # Every day folder always has the same five files, so a legitimate run never deletes a
+          # tracked file. A deletion means an interrupted swap: refuse to commit it. --no-renames:
+          # otherwise a deleted day plus a similar new day (empty .jsonl.gz files are byte-identical)
+          # shows up as a rename (R) and slips past the D filter.
+          deleted="$(git diff --cached --no-renames --name-only --diff-filter=D)"
+          if [ -n "$deleted" ]; then
+            echo "::error title=Data commit refused::The snapshot would delete $(printf '%s\n' "$deleted" | wc -l) tracked file(s); not committing. Inspect the data repo."
+            exit 1
+          fi
+          status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status","unknown"))' "${day}/run.json")"
+          git commit --quiet -m "snapshot ${SNAPSHOT_DATE} (${status})"
+          # Push auth via an env-only git config entry: never in a URL, argv or .git/config.
+          auth="$(printf 'x-access-token:%s' "$DATA_REPO_PAT" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
+          if ! git push --quiet origin HEAD:main; then
+            git pull --quiet --rebase origin main
+            git push --quiet origin HEAD:main
+          fi
+          echo "Pushed snapshot ${SNAPSHOT_DATE} (${status}) to ${DATA_REPO}."
+
+      - name: Fail on snapshot error
+        if: ${{ !cancelled() }}
+        env:
+          EXIT_CODE: ${{ steps.snapshot.outputs.exit_code }}
+        run: python scripts/summarize_run.py check --exit-code "$EXIT_CODE"

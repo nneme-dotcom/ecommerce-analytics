@@ -1,0 +1,5 @@
+# Reviewed false positives (fingerprint = commit:file:rule:line). Add a line only after a human
+# has checked the finding is not a real secret, with a comment saying why.
+
+# Fake refresh token used as a test fixture in tests/test_check_secrets.py (PR #4, first commit).
+0a9f67330a116071bb6757cc6516a17772259927:tests/test_check_secrets.py:generic-api-key:10
