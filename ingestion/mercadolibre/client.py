@@ -2,10 +2,11 @@
 
 - Bearer token in the ``Authorization`` header only (never in a URL).
 - Sequential requests with a configurable delay between them.
-- Retries with exponential backoff on 429 and 5xx (and transport errors), at most ``max_retries``.
+- Retries with exponential backoff on 429 and 5xx (and any ``httpx.HTTPError``), at most
+  ``max_retries``.
 - A hard cap on HTTP requests per run (retries count towards it).
 - Failed calls are recorded as ``{path, status}`` without payloads (``status`` is ``None`` for
-  transport errors such as timeouts). Tokens are never logged.
+  network errors such as timeouts). Tokens are never logged.
 """
 
 from __future__ import annotations
@@ -27,6 +28,16 @@ MAX_BACKOFF_S = 60.0
 DEFAULT_TIMEOUT_S = 30.0
 
 logger = logging.getLogger(__name__)
+
+
+class _NotFound:
+    """Sentinel returned by ``get(..., not_found_ok=True)`` on a 404."""
+
+    def __repr__(self) -> str:
+        return "NOT_FOUND"
+
+
+NOT_FOUND = _NotFound()
 
 
 class RequestCapReached(RuntimeError):
@@ -79,11 +90,19 @@ class MercadoLibreClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def get(self, path: str, params: Mapping[str, Any] | None = None) -> Any | None:
+    def get(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        not_found_ok: bool = False,
+    ) -> Any | None:
         """GET ``path`` and return decoded JSON, or ``None`` if the call ultimately failed.
 
-        Failures are appended to ``self.errors``. Raises ``RequestCapReached`` when the cap would
-        be exceeded.
+        Failures (including a 200 whose body is not JSON or is JSON ``null``) are appended to
+        ``self.errors``. With ``not_found_ok`` a 404 returns the ``NOT_FOUND`` sentinel without
+        being recorded (e.g. no offers / end of data on paginated endpoints). Raises
+        ``RequestCapReached`` when the cap would be exceeded.
         """
         if not path.startswith("/"):
             path = "/" + path
@@ -93,11 +112,16 @@ class MercadoLibreClient:
             status, response = self._send_once(url, path, params)
             if response is not None and status == 200:
                 try:
-                    return response.json()
+                    body = response.json()
                 except ValueError:
-                    logger.warning("GET %s status=200 but body is not JSON", path)
+                    body = None
+                if body is None:
+                    logger.warning("GET %s status=200 but body is not JSON or is null", path)
                     self._record_error(path, status)
-                    return None
+                return body
+            if status == 404 and not_found_ok:
+                logger.debug("GET %s status=404 (not found, not an error)", path)
+                return NOT_FOUND
             retryable = status is None or _is_retryable(status)
             if retryable and attempt < self.max_retries:
                 wait = self._backoff(attempt, response)
@@ -119,8 +143,8 @@ class MercadoLibreClient:
         self.requests_made += 1
         try:
             response = self._http.get(url, params=params, headers=self._headers)
-        except httpx.TransportError as exc:
-            logger.warning("GET %s transport error: %s", path, type(exc).__name__)
+        except httpx.HTTPError as exc:
+            logger.warning("GET %s HTTP error: %s", path, type(exc).__name__)
             return None, None
         logger.debug("GET %s status=%s", path, response.status_code)
         return response.status_code, response
@@ -131,6 +155,10 @@ class MercadoLibreClient:
             if retry_after and retry_after.isdigit():
                 return min(float(retry_after), MAX_BACKOFF_S)
         return min(self.backoff_base_s * (2**attempt), MAX_BACKOFF_S)
+
+    def record_error(self, path: str, status: int | None) -> None:
+        """Record a failure that happened outside ``get`` (e.g. a malformed payload)."""
+        self._record_error(path, status)
 
     def _record_error(self, path: str, status: int | None) -> None:
         logger.warning("GET %s failed status=%s", path, status)

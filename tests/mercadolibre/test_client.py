@@ -3,7 +3,7 @@ import logging
 import httpx
 import pytest
 
-from ingestion.mercadolibre.client import MercadoLibreClient, RequestCapReached
+from ingestion.mercadolibre.client import NOT_FOUND, MercadoLibreClient, RequestCapReached
 
 ACCESS = "fake-access-xyz"
 BASE = "https://api.test"
@@ -138,6 +138,38 @@ def test_no_token_in_any_log_record(caplog):
     for record in caplog.records:
         assert ACCESS not in record.getMessage()
         assert "Bearer" not in record.getMessage()
+
+
+def test_any_httpx_error_is_retried_and_recorded():
+    def handler(request):
+        raise httpx.RemoteProtocolError("peer closed", request=request)
+
+    client, _ = make_client(handler, max_retries=1)
+    assert client.get("/trends/MLA") is None
+    assert client.requests_made == 2
+    assert client.errors == [{"path": "/trends/MLA", "status": None}]
+
+
+@pytest.mark.parametrize("body", [b"null", b"not json"])
+def test_200_with_null_or_invalid_body_is_recorded(body):
+    client, _ = make_client(lambda r: httpx.Response(200, content=body))
+    assert client.get("/products/MLA1") is None
+    assert client.errors == [{"path": "/products/MLA1", "status": 200}]
+
+
+def test_not_found_ok_returns_sentinel_without_recording():
+    client, _ = make_client(lambda r: httpx.Response(404, json={}))
+    assert client.get("/products/MLA1/items", not_found_ok=True) is NOT_FOUND
+    assert client.errors == []
+    assert client.get("/products/MLA1/items") is None
+    assert client.errors == [{"path": "/products/MLA1/items", "status": 404}]
+
+
+def test_record_error_is_public_and_aggregated():
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    client.record_error("/products/X", None)
+    client.record_error("/products/X", None)
+    assert client.error_summary() == [{"path": "/products/X", "status": None, "count": 2}]
 
 
 def test_empty_token_rejected():

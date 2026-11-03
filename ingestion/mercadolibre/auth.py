@@ -3,18 +3,26 @@
 Mercado Libre refresh tokens rotate on every use (ADR-004): every successful refresh returns a NEW
 refresh token and invalidates the old one. Callers must persist ``TokenPair.refresh_token``.
 
+Transient token-endpoint failures (429, 5xx, connect/timeout errors) are retried with exponential
+backoff; if they persist, ``TransientAuthError`` is raised (the refresh token is probably still
+valid, so the next run can try again). ``invalid_grant`` raises ``ReauthorizationRequired``.
+
 Token values are never logged and never included in exception messages or ``repr``.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import httpx
 
 TOKEN_URL = "https://api.mercadolibre.com/oauth/token"  # noqa: S105 (a URL, not a secret)
 DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_BASE_S = 2.0
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +38,10 @@ class AuthError(RuntimeError):
 
 class ReauthorizationRequired(AuthError):
     """The refresh token (or authorization code) was rejected. The owner must re-authorize."""
+
+
+class TransientAuthError(AuthError):
+    """The token endpoint kept failing with 429/5xx or network errors after all retries."""
 
 
 REAUTHORIZE_HINT = (
@@ -51,20 +63,57 @@ class TokenPair:
     scope: str | None = None
 
 
-def _post_token(form: dict[str, str], http: httpx.Client | None) -> TokenPair:
+def _is_transient(status: int) -> bool:
+    return status == 429 or 500 <= status <= 599
+
+
+def _post_token(
+    form: dict[str, str],
+    http: httpx.Client | None,
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> TokenPair:
     grant_type = form.get("grant_type", "?")
     own_client = http is None
     client = http or httpx.Client(timeout=DEFAULT_TIMEOUT_S)
     try:
-        try:
-            response = client.post(
-                TOKEN_URL,
-                data=form,  # form-encoded body, never query string
-                headers={"Accept": "application/json"},
+        attempt = 0
+        while True:
+            try:
+                response = client.post(
+                    TOKEN_URL,
+                    data=form,  # form-encoded body, never query string
+                    headers={"Accept": "application/json"},
+                )
+                failure = f"HTTP {response.status_code}"
+                transient = _is_transient(response.status_code)
+            except httpx.HTTPError as exc:
+                # Exception text from httpx does not contain the request body; log the type only.
+                response = None
+                failure = type(exc).__name__
+                transient = True
+            if not transient:
+                break
+            if attempt >= max_retries:
+                logger.warning("POST /oauth/token grant_type=%s failed: %s", grant_type, failure)
+                raise TransientAuthError(
+                    f"Token endpoint unavailable after {max_retries} retries ({failure}). "
+                    "The refresh token was probably not consumed: retry later. If the next run "
+                    "gets invalid_grant, the owner must re-authorize.",
+                    status=response.status_code if response is not None else None,
+                )
+            wait = backoff_base_s * (2**attempt)
+            logger.info(
+                "POST /oauth/token grant_type=%s %s; retry %d in %.1fs",
+                grant_type,
+                failure,
+                attempt + 1,
+                wait,
             )
-        except httpx.HTTPError as exc:
-            # Exception text from httpx does not contain the request body.
-            raise AuthError(f"Token request failed: {type(exc).__name__}") from None
+            sleep(wait)
+            attempt += 1
     finally:
         if own_client:
             client.close()
@@ -121,10 +170,14 @@ def refresh_access_token(
     refresh_token: str,
     *,
     http: httpx.Client | None = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> TokenPair:
     """Exchange a refresh token for a new access token AND a new (rotated) refresh token.
 
-    Raises ``ReauthorizationRequired`` on ``invalid_grant`` and ``AuthError`` on anything else.
+    Raises ``ReauthorizationRequired`` on ``invalid_grant``, ``TransientAuthError`` when 429/5xx/
+    network errors persist after retries, and ``AuthError`` on anything else.
     """
     if not (client_id and client_secret and refresh_token):
         raise AuthError("client_id, client_secret and refresh_token are all required")
@@ -136,6 +189,9 @@ def refresh_access_token(
             "refresh_token": refresh_token,
         },
         http,
+        max_retries=max_retries,
+        backoff_base_s=backoff_base_s,
+        sleep=sleep,
     )
 
 
@@ -147,6 +203,7 @@ def exchange_authorization_code(
     code_verifier: str,
     *,
     http: httpx.Client | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> TokenPair:
     """Exchange a one-time authorization code (PKCE S256) for the first token pair."""
     return _post_token(
@@ -159,4 +216,5 @@ def exchange_authorization_code(
             "code_verifier": code_verifier,
         },
         http,
+        sleep=sleep,
     )

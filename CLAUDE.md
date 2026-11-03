@@ -55,6 +55,8 @@ not analyses for their own sake.
 - Working: `/sites/MLA/categories`, `/categories/{id}`, `/highlights/MLA/category/{cat}`,
   `/products/search`, `/products/{id}`, `/products/{id}/items`, `/trends/MLA`.
 - Blocked (403, do not build on them): `/sites/MLA/search`, `/items/{id}`, `/items/{id}/prices`.
+- `/products/{id}/items` pages with `offset`/`limit`; an offset at or beyond `paging.total` returns 404.
+- Highlights `content[].type` is `PRODUCT`, `USER_PRODUCT` or `ITEM`; only `PRODUCT` can be followed.
 - There is **no sales/units data**. Ranking position in best sellers is our demand proxy.
 - Be polite: sequential requests, small delay, retry with backoff on 429/5xx, hard cap per run.
 
@@ -81,3 +83,15 @@ Filled in as each area is built. Keep this section accurate.
 | Test Python | `pytest` |
 | Install Python deps | `pip install -r requirements.txt` |
 | ML one-time authorization (owner, interactive; needs env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REDIRECT_URI`) | `python -m ingestion.mercadolibre.authorize` |
+| ML daily snapshot (env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`) | `python -m ingestion.mercadolibre.snapshot --out <storage-root> --new-refresh-token-file <path> [--date YYYY-MM-DD] [--categories ...]` |
+
+Snapshot exit codes (ADR-008; the scheduled workflow branches on these):
+
+| Code | Meaning | Rotated refresh token file written? | Action |
+|------|---------|-------------------------------------|--------|
+| 0 | `success` or `partial` (data written; see `run.json`) | yes | save token |
+| 1 | `failed` (no category captured, or aborted after the token was saved) | yes | save token; investigate |
+| 2 | re-authorization required (`invalid_grant`, or token endpoint rejected the credentials) | no | owner runs `python -m ingestion.mercadolibre.authorize` |
+| 3 | new refresh token could not be persisted | no | owner must re-authorize (old token already consumed) |
+| 4 | token endpoint unavailable after retries (429/5xx/network) | no | retry later: the old token is *probably* still valid; if the next run gets `invalid_grant` (exit 2), re-authorize |
+| 5 | configuration error (missing env vars) | no | fix the secrets/env |
