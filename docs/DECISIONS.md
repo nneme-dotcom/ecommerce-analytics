@@ -105,12 +105,16 @@ after an interrupted folder swap could delete a good day from the data repo.
   0 or 1 (a killed step reports nothing). It also runs if the token save failed: the data is valid.
   It commits only when `snapshot_date=<date>/run.json` exists and **refuses any commit that deletes a
   tracked file** (every day folder has the same five files, so a deletion can only come from an
-  interrupted swap). No changes (ADR-007 kept a better day) = no commit.
+  interrupted swap; checked with `--no-renames` so a deleted day can't pass as a rename). No changes (ADR-007 kept a better day) = no commit.
 - The date is computed once (UTC) and passed with `--date`, so the run, the summary and the commit
   message refer to the same day even across midnight.
-- One global `concurrency` group, `cancel-in-progress: false`; the job runs only on `main`
-  (every run consumes the token, so branch code must not run it).
-- `GITHUB_TOKEN` is `contents: read`; all writes go through the fine-grained PAT.
+- Job-level `concurrency` group keyed by ref, `cancel-in-progress: false`: a running job is never
+  cancelled; GitHub keeps one pending job per group (older pending ones are cancelled), and the ref key
+  stops a non-main dispatch from displacing a pending main run. The job runs only on `main` (every run
+  consumes the token, so branch code must not run it).
+- `GITHUB_TOKEN` is `contents: read`; all writes go through `DATA_REPO_PAT` (one PAT, no GitHub
+  Environment: owner-accepted risk, ADR-010). Neither checkout persists credentials; the PAT reaches
+  git only in the push step, as an env-only `http.extraheader` (never in a URL, argv or `.git/config`).
 
 **Consequences.** If the data contract ever renames or drops a snapshot file, the deletion guard
 will refuse the first re-run of an existing day; update the guard in the same PR as the contract.

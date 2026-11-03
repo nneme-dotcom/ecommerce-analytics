@@ -10,16 +10,12 @@ on:
     - cron: "23 5 * * *"  # 05:23 UTC daily (off the hour to avoid the top-of-hour queue)
   workflow_dispatch:
 
-# Least privilege: GITHUB_TOKEN only reads this repo. Every write (data repo push, secret update)
-# goes through the fine-grained DATA_REPO_PAT.
+# GITHUB_TOKEN only reads this repo. Every write (data repo push, secret update) goes through
+# DATA_REPO_PAT, a single fine-grained PAT with Contents RW on both repos and Secrets RW on this one.
+# That PAT is broader than this job needs and no GitHub Environment gates it: owner-accepted risk,
+# see ADR-010. It is handed only to the steps that need it, never persisted in git config.
 permissions:
   contents: read
-
-# Never two runs at once: one run's stale-folder cleanup can break another run's swap, and two runs
-# would race on the single-use refresh token. Queued runs wait; nothing is cancelled.
-concurrency:
-  group: ml-daily-snapshot
-  cancel-in-progress: false
 
 defaults:
   run:
@@ -32,6 +28,14 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    # Never two runs at once: one run's stale-folder cleanup can break another run's swap, and two
+    # runs would race on the single-use refresh token. A running job is never cancelled, but GitHub
+    # keeps only ONE pending job per group and cancels any older pending one. The ref is part of the
+    # group so a dispatch from another ref can never displace a pending main run (non-main runs are
+    # skipped by the `if:` above anyway).
+    concurrency:
+      group: ml-daily-snapshot-${{ github.ref }}
+      cancel-in-progress: false
     env:
       DATA_REPO: nneme-dotcom/ecommerce-analytics-data
     steps:
@@ -46,6 +50,8 @@ jobs:
           ref: main
           path: data
           token: ${{ secrets.DATA_REPO_PAT }}
+          # Read-only use here; push credentials are supplied only in the push step.
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
@@ -136,6 +142,11 @@ jobs:
           (steps.snapshot.outputs.exit_code == '0' || steps.snapshot.outputs.exit_code == '1')
         env:
           SNAPSHOT_DATE: ${{ steps.date.outputs.date }}
+          DATA_REPO_PAT: ${{ secrets.DATA_REPO_PAT }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         working-directory: data
         run: |
           day="mercadolibre/snapshot_date=${SNAPSHOT_DATE}"
@@ -149,16 +160,22 @@ jobs:
             exit 0
           fi
           # Every day folder always has the same five files, so a legitimate run never deletes a
-          # tracked file. A deletion means an interrupted swap: refuse to commit it.
-          deleted="$(git diff --cached --name-only --diff-filter=D)"
+          # tracked file. A deletion means an interrupted swap: refuse to commit it. --no-renames:
+          # otherwise a deleted day plus a similar new day (empty .jsonl.gz files are byte-identical)
+          # shows up as a rename (R) and slips past the D filter.
+          deleted="$(git diff --cached --no-renames --name-only --diff-filter=D)"
           if [ -n "$deleted" ]; then
             echo "::error title=Data commit refused::The snapshot would delete $(printf '%s\n' "$deleted" | wc -l) tracked file(s); not committing. Inspect the data repo."
             exit 1
           fi
           status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status","unknown"))' "${day}/run.json")"
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit --quiet -m "snapshot ${SNAPSHOT_DATE} (${status})"
+          git commit --quiet -m "snapshot ${SNAPSHOT_DATE} (${status})"
+          # Push auth via an env-only git config entry: never in a URL, argv or .git/config.
+          auth="$(printf 'x-access-token:%s' "$DATA_REPO_PAT" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
           if ! git push --quiet origin HEAD:main; then
             git pull --quiet --rebase origin main
             git push --quiet origin HEAD:main
