@@ -156,3 +156,28 @@ make row-count checks and transactions awkward.
   `kaggle` package: one GET does not justify another dependency (and its config-file handling).
 
 **Consequences.** A full real load takes about 3 s locally. The DB role used by tests needs CREATEDB.
+
+## ADR-012 — Enrichment sources: Frankfurter v1 (ECB only) and Nager.Date v4 (2026-11-03)
+
+**Context.** Task 1.5 named `api.frankfurter.app/<start>..<end>` and
+`date.nager.at/api/v3/PublicHolidays/<year>/<cc>`. Neither API is reachable from the agents'
+workspace, so their current shape was checked in the projects' own repositories on GitHub
+(`lineofflight/frankfurter` at fb22bf8, 2026-10-30; `nager/Nager.Date` at 657d738, 2026-11-03).
+Findings: Frankfurter moved to `api.frankfurter.dev` in 2024; v2 (2026-05) blends 50+ central
+banks, while **v1 is frozen, ECB-only, kept "indefinitely"**, and its interval endpoint returns one
+key per ECB day. The ECB reference rates do not include ARS. Nager.Date REST **v3 reaches end of life
+on 2027-01-31**; v4 (`nagerholidays.com/api/v4/Holidays/{cc}/{year}`) replaces it with different
+fields (`nationalHoliday`, `subdivisionCodes`, `holidayTypes`; no `localName`).
+
+**Decision.**
+- FX from **Frankfurter v1** (base URL overridable with `--base-url`): the contract promises ECB
+  rates, and v1 guarantees the provider. Fetched one calendar year per request, every chunk validated
+  and density-checked so a silently downsampled/truncated answer fails. Rates kept as `Decimal`.
+- **ARS is not loaded** (not an ECB currency); it is a later task with its own source decision.
+- Holidays from **Nager.Date v4**, so the loader does not die in three months.
+- No new dependency (httpx + psycopg from ADR-011). Live runs only through the manual workflow
+  `enrichment-load.yml` (throwaway Postgres + CSV artifact); no schedule yet.
+
+**Consequences.** The payload shapes are assumptions until the first workflow run; the loaders
+fail loudly (exit 1, nothing loaded) on any deviation. If v1 is ever retired, switch to
+`/v2/rates?providers=ECB` and update this ADR and DATA_CONTRACT §2b.

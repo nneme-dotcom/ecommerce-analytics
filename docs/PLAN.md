@@ -20,7 +20,7 @@ Status: `todo` · `in progress` · `in review` · `done`.
 | 1.2 | ML daily snapshot job (best sellers → products → offers, 5 categories) | data-engineer | in review | Writes files matching DATA_CONTRACT; idempotent per day; request cap |
 | 1.3 | Scheduled workflow running 1.2 daily + persisting rotated refresh token | devops | in review | 3 consecutive successful daily runs |
 | 1.4 | Olist download + load into PostgreSQL staging | data-engineer | in review | Row counts match source; reproducible from one command |
-| 1.5 | Enrichment: FX rates (ECB) and holidays (Nager.Date) | data-engineer | todo | Loaded to staging with tests |
+| 1.5 | Enrichment: FX rates (ECB) and holidays (Nager.Date) | data-engineer | in review | Loaded to staging with tests |
 
 ## Phase 2 — Model and metrics
 

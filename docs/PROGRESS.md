@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 1 — Data in
-- **Next up:** watch the daily runs — 1.3 needs 3 consecutive daily successes (1 of 3 so far: run 41729877814); 1.4 in review (PR A), then 1.5.
+- **Next up:** watch the daily runs — 1.3 needs 3 consecutive daily successes (1 of 3 so far: run 41729877814); 1.4 and 1.5 in review; after merge run the manual *Enrichment load* workflow once.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,30 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-03 — data-engineer — 1.5 (branch `ingestion/enrichment`, based on 1.4)
+Done: `python -m ingestion.enrichment.fx_rates` (ECB rates EUR→BRL,USD from Frankfurter **v1**,
+2016-09-01 → today, one request per calendar year, payload + density validation, `Decimal` rates)
+and `python -m ingestion.enrichment.holidays` (Nager.Date **v4**; BR 2016–2018, AR 2026 → next year;
+`--only CC:YYYY[-YYYY]`). Both load `raw_enrichment` in one transaction (delete requested range/pairs,
+`COPY` the fetched rows, audit row in `raw_enrichment._load_audit`); `--csv-out` fetches without a DB.
+Shared `ingestion/enrichment/http.py`: sequential, 0.5 s delay, request cap, backoff on 429/5xx/network
+(numeric `Retry-After`). Manual workflow `.github/workflows/enrichment-load.yml` (workflow_dispatch
+only, no secrets): runs both against the live APIs into a Postgres service, writes row counts to
+the job summary, uploads the CSVs as an artifact. ADR-012; DATA_CONTRACT §2b.
+`db_conn` test fixture is now autocommit (loader transactions are real, not savepoints).
+Not done / open: **never run live** (APIs blocked here): the owner/orchestrator should run
+*Enrichment load (manual)* once after merge (`gh workflow run enrichment-load.yml --ref main`) and
+check: BRL/USD ≈ 2,600+ days each from 2016-09-01, ~10–20 BR/AR entries per year.
+ARS deliberately not loaded (not an ECB currency); needs its own task and source decision.
+No persistent warehouse exists yet, so nothing keeps these rows between runs (the artifact does).
+Gotchas for the next agent: the task text named `api.frankfurter.app` and Nager v3; both are
+superseded (ADR-012). The holidays table has no PK and keeps all holiday types: filter
+`'Public' = ANY(holiday_types)` in staging. FX has no rows on weekends/TARGET holidays.
+CLAUDE.md Commands rows for 1.5 handed to the orchestrator.
+Files touched: ingestion/enrichment/**, tests/enrichment/**, tests/conftest.py,
+.github/workflows/enrichment-load.yml, README.md, docs/DATA_CONTRACT.md, docs/DECISIONS.md,
+docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-03 — data-engineer — 1.4 (branch `ingestion/olist-load`)
 Done: `python -m ingestion.olist.download` (Kaggle REST endpoint with `KAGGLE_USERNAME`/`KAGGLE_KEY`

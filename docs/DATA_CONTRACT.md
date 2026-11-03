@@ -208,6 +208,71 @@ Latest load per table: `SELECT DISTINCT ON (table_name) * FROM raw_olist._load_a
 
 ---
 
+## 2b. Enrichment raw — `draft`
+
+Schema `raw_enrichment`, written by task 1.5. Both sources are public and unauthenticated. Unlike
+`raw_olist`, values arrive as JSON and are stored **typed** (dates, numerics, booleans, arrays).
+Source shapes are documented assumptions (ADR-012): neither API is reachable from the agents'
+workspace; the first live run is the manual workflow `enrichment-load.yml`.
+
+### `raw_enrichment.fx_rates` (`python -m ingestion.enrichment.fx_rates`)
+
+ECB euro foreign exchange reference rates, one row per ECB publication day and currency
+(no rows on weekends or TARGET holidays: carry-forward is a `staging` decision).
+Source: Frankfurter **v1** (`https://api.frankfurter.dev/v1/<start>..<end>?from=EUR&to=BRL,USD`),
+which serves ECB data only.
+
+| column | type | notes |
+|--------|------|-------|
+| rate_date | date | ECB reference date |
+| base_currency | char(3) | always `EUR` |
+| quote_currency | char(3) | `BRL`, `USD` |
+| rate | numeric (> 0) | units of quote currency per 1 EUR, exact as published (no float rounding) |
+| source | text | `ECB via Frankfurter v1` |
+
+PK (`rate_date`, `base_currency`, `quote_currency`). Default coverage: 2016-09-01 → today (UTC).
+USD→BRL etc. are derived in `staging` (cross rate = BRL/USD on the same date).
+**ARS is not available**: the ECB does not publish an ARS reference rate, and the loader refuses
+`--quotes ARS`. ARS (needed to convert Mercado Libre prices) is left for a later task; a candidate
+source is BCRA (Frankfurter v2 exposes it as provider `BCRA`), not decided.
+Load rule: one transaction deletes the requested date range × currencies and inserts the fetched
+rows (idempotent; picks up revisions). A chunk (one calendar year per request) must be dense
+(≥ 80 % of weekdays have a rate) or the run fails; an empty answer never deletes data.
+
+### `raw_enrichment.public_holidays` (`python -m ingestion.enrichment.holidays`)
+
+One row per holiday entry as returned by Nager.Date **v4**
+(`https://nagerholidays.com/api/v4/Holidays/{countryCode}/{year}`). All holiday types are kept
+(`Public`, `Bank`, `School`, `Authorities`, `Optional`, `Observance`); filter in `staging`.
+
+| column | type | source field |
+|--------|------|--------------|
+| country_code | char(2) | request param (`countryCode` must match) |
+| holiday_date | date | `date` |
+| name | text | `name` (English; v4 has no local name) |
+| national_holiday | boolean? | `nationalHoliday` |
+| subdivision_codes | text[] | `subdivisionCodes`, ISO 3166-2 (e.g. `BR-SP`); null → `{}` |
+| holiday_types | text[] | `holidayTypes`; null → `{}` |
+| source | text | `Nager.Date v4` |
+
+No primary key (raw as returned; the same date may appear for different subdivisions or types).
+Default coverage: **BR 2016–2018** (Olist years) and **AR 2026 → next year** (Mercado Libre years);
+override with `--only CC:YYYY[-YYYY]`. Load rule: one transaction deletes the requested
+(country, year) pairs and inserts the fetched rows; a (country, year) answering with no entries
+fails the run and nothing changes.
+
+### `raw_enrichment._load_audit` (append-only)
+
+| column | type | notes |
+|--------|------|-------|
+| load_id | uuid | one per run; PK (`load_id`, `table_name`) |
+| table_name | text | `fx_rates` or `public_holidays` |
+| row_count | bigint | rows inserted by this run |
+| params | jsonb | fx: `{start, end, base, quotes, source}`; holidays: `{countries_years: ["BR:2016", ...], source}` |
+| loaded_at | timestamptz | transaction time |
+
+---
+
 ## 3. Warehouse (PostgreSQL) — `draft`
 
 Layers: `raw_*` (as ingested) → `staging` (typed, cleaned, renamed) → `core` (star schema) → `marts` (metrics).
