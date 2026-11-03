@@ -81,3 +81,4 @@ Filled in as each area is built. Keep this section accurate.
 | Test Python | `pytest` |
 | Install Python deps | `pip install -r requirements.txt` |
 | ML one-time authorization (owner, interactive; needs env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REDIRECT_URI`) | `python -m ingestion.mercadolibre.authorize` |
+| ML daily snapshot (env `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_REFRESH_TOKEN`; exit 0 success/partial, 1 failed, 2 auth, 3 token not persisted) | `python -m ingestion.mercadolibre.snapshot --out <storage-root> --new-refresh-token-file <path> [--date YYYY-MM-DD] [--categories ...]` |
