@@ -134,3 +134,25 @@ GitHub Environment. The owner is the only contributor.
 adding collaborators or making the project a team effort: split into two PATs (or a GitHub App)
 and move the secrets into an Environment restricted to `main`. Supersedes ADR-003's
 "PAT scoped to that repo only" wording.
+
+## ADR-011 — psycopg 3 for PostgreSQL loads; raw Olist as one-transaction COPY (2026-11-03)
+
+**Context.** Task 1.4 loads ~1.55 M rows (nine CSVs) into PostgreSQL. The standard library has no
+PostgreSQL driver; shelling out to `psql \copy` would make the load depend on a client binary and
+make row-count checks and transactions awkward.
+
+**Decision.**
+- Add **`psycopg[binary]` (v3)** as a runtime dependency. It is the maintained PostgreSQL driver,
+  exposes `COPY FROM STDIN` as a streaming API (`cursor.copy`) and composes identifiers safely
+  (`psycopg.sql`). The `binary` extra bundles libpq, so it installs the same way on the owner's PC,
+  GitHub runners and the agents' workspace without a system libpq. It is imported only by loader code.
+- Raw tables are all-`text`, loaded with `COPY (FORMAT csv, HEADER)`; the nine tables and their
+  audit rows are **one transaction** (truncate + copy + count check per table), so a failure
+  leaves the previous complete load in place. Tables are re-created only if their columns drift,
+  without `CASCADE`.
+- Tests run against a real throwaway PostgreSQL (CI: service container; locally: `DATABASE_URL`
+  or an auto-started `initdb` cluster); each session creates and drops its own database.
+- Kaggle download uses the documented REST endpoint with httpx (Basic auth from env), not the
+  `kaggle` package: one GET does not justify another dependency (and its config-file handling).
+
+**Consequences.** A full real load takes about 3 s locally. The DB role used by tests needs CREATEDB.

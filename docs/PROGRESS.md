@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 1 — Data in
-- **Next up:** watch the daily runs — 1.3 needs 3 consecutive daily successes (1 of 3 so far: run 41729877814); then 1.4 / 1.5.
+- **Next up:** watch the daily runs — 1.3 needs 3 consecutive daily successes (1 of 3 so far: run 41729877814); 1.4 in review (PR A), then 1.5.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,29 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-03 — data-engineer — 1.4 (branch `ingestion/olist-load`)
+Done: `python -m ingestion.olist.download` (Kaggle REST endpoint with `KAGGLE_USERNAME`/`KAGGLE_KEY`
+as Basic auth, 429/5xx/network retried with backoff, or `--from-zip`). Accepts only an archive
+holding exactly the nine CSVs at its root; extracts to a temp folder, verifies CRC, writes
+`manifest.json` (SHA-256 + bytes per file) last. `python -m ingestion.olist.load` validates every
+file first (header = contract, record arity, SHA-256 vs manifest, records counted with `csv`), then
+loads all nine `raw_olist` tables (all `text`) in **one transaction**: truncate + `COPY` + count check +
+`raw_olist._load_audit` row per table. `ingestion/db.py` reads `DATABASE_URL` (never logged).
+`tests/conftest.py`: throwaway DB per session (on `DATABASE_URL`, else an auto-started `initdb`
+cluster, else skip). CI `python` job gets a `postgres:16` service + `DATABASE_URL`. psycopg 3: ADR-011.
+Verified on the real Kaggle archive (44,717,580 bytes): download `--from-zip` OK, full load ~3 s,
+DB counts = CSV records for all nine tables (contract §2), rerun idempotent, BOM stripped.
+Not done / open: Kaggle API mode never run live (kaggle.com blocked here; mocked only).
+CLAUDE.md Commands rows for 1.4 handed to the orchestrator (agents don't edit CLAUDE.md).
+Gotchas for the next agent: the Olist CSVs are in `data/olist` (git-ignored) or wherever `--dest`
+pointed. Staging must rename `*_lenght` → `*_length`; empty unquoted fields are NULL in raw.
+The loader re-creates a raw table without `CASCADE` when its columns drift, so staging views on raw
+tables block such a change (on purpose). Tests: no `__init__.py` in test dirs, so test file names
+must be unique repo-wide. `initdb` refuses root: as root, set `DATABASE_URL`.
+Files touched: ingestion/db.py, ingestion/olist/**, tests/conftest.py, tests/olist/**,
+.github/workflows/ci.yml, requirements.txt, pyproject.toml, README.md, docs/DATA_CONTRACT.md,
+docs/DECISIONS.md, docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-03 — orchestrator — 1.3 first live run
 Done: first real snapshot (run 41729877814): `success`, 195 requests, 100 highlights, 87 products,

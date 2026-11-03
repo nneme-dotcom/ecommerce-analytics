@@ -12,6 +12,23 @@ jobs:
   python:
     name: Lint and test (Python)
     runs-on: ubuntu-latest
+    # Throwaway PostgreSQL for the loader tests (tests/conftest.py creates and drops its own
+    # database on it). Test-only credentials: the service is not reachable outside the job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

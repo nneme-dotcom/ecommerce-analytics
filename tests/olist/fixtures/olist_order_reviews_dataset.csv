@@ -1,0 +1,7 @@
+"review_id","order_id","review_score","review_comment_title","review_comment_message","review_creation_date","review_answer_timestamp"
+"r0000000000000000000000000000001","o0000000000000000000000000000001",5,,"Chegou antes do prazo, recomendo!","2017-10-11 00:00:00","2017-10-12 03:43:48"
+"r0000000000000000000000000000002","o0000000000000000000000000000002",1,"Ruim","Produto veio com defeito.
+Pedi troca e ninguém respondeu.
+
+Não compro mais, ""nunca""","2018-02-20 00:00:00","2018-02-21 10:01:12"
+"r0000000000000000000000000000003","o0000000000000000000000000000003",4,"","","2018-03-01 00:00:00","2018-03-02 09:00:00"
