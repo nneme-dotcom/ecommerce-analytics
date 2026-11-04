@@ -57,7 +57,7 @@ changed; `raw_schema.py` already checks `_load_audit` first (the 1.8 finding).
 Files touched: ingestion/mercadolibre/load.py, ingestion/mercadolibre/raw_schema.py (new),
 tests/mercadolibre/test_ml_raw_load.py (new), docs/DATA_CONTRACT.md (§1b), docs/DECISIONS.md
 (ADR-015), docs/PLAN.md, docs/PROGRESS.md
-Review round 1 (fixes uncommitted, for the orchestrator): (1, blocking) orphan days are now read
+Review round 1 (fixes in 756fc79; round 2 APPROVE): (1, blocking) orphan days are now read
 from the union of all five data tables **before** any drop (`raw_schema` split into
 `prepare_schema` / `stale_data_tables` / `recreate_data_tables`); a (re-)create while orphans exist
 raises `LoadError` (rolled back, exit 1, message says to use the full data repo checkout); a drifted

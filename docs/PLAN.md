@@ -25,6 +25,7 @@ Status: `todo` · `in progress` · `in review` · `done`.
 | 1.7 | Migrate holidays to Nager.Date v4 (before v3 EOL 2027-01-31) | data-engineer | todo | v4 endpoint and fields verified by a live run; loader, DATA_CONTRACT §2b and ADR updated in one PR |
 | 1.8 | Enrichment hardening (PR #8 round-3 low findings) | data-engineer | todo | `store.ensure_schema` checks `_load_audit` before touching the target table (store.py:107-130); drift check also covers constraints (PK, NOT NULL, CHECK) or §2b states the gap; test that 8 days before a chunk start is rejected (`test_date_far_before_the_chunk_start_is_an_error`, test_fx_rates.py:170-177); the load log reports the actual min/max dates loaded, not the requested range (fx_rates.py:298); audit-drift holiday test asserts the earlier rows survive (test_holidays.py:256-276) |
 | 1.9 | Snapshot writer: handle lone surrogates in API strings | data-engineer | todo | `snapshot._write_jsonl_gz` cannot fail on a lone surrogate from the API (replace or escape it, and record it); test added (PR #11 review side note: `json.loads` turns a `\udc80` escape into a str that `.encode("utf-8")` refuses) |
+| 1.10 | ML raw loader polish (PR #11 round-2 low findings) | data-engineer | todo | A file read `OSError` names the folder/file (load.py:256,298); the orphan-plus-drift error and §1b also offer "delete that day's rows by hand" when a day was removed on purpose (load.py:483-490); "stored day(s)" wording in both messages (load.py:493-497) |
 
 ## Phase 2 — Model and metrics
 
