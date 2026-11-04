@@ -23,11 +23,13 @@ Files touched:
 ### 2026-11-04 — orchestrator — 1.5 closed
 Done: PR #8 merged (squash 541596b) after review round 3 (APPROVE) and green CI. First live
 *Enrichment load* run 41806204617 succeeded: `raw_enrichment.fx_rates` 5208 rows (BRL, USD,
-2016-09-01..2026-11-04); `raw_enrichment.public_holidays` 74 rows (BR 2016–2018: 14 each; AR
+requested range 2016-09-01..2026-11-04; the last loaded date is probably 2026-11-03, as the ECB
+publishes after 16:00 CET); `raw_enrichment.public_holidays` 74 rows (BR 2016–2018: 14 each; AR
 2026–2027: 16 each). Frankfurter v1 and Nager.Date v3 payloads matched the loaders' strict
 validation. CLAUDE.md commands rows added for both loaders and the workflow. PLAN: 1.1, 1.2, 1.4,
-1.5 done; 1.8 added for the round-3 low findings.
-Not done / open: 1.3 (the 05:23 UTC schedule did not fire on its first day; owner decides on a manual run).
+1.5 done; 1.8 added for the round-3 low findings. Acceptance wording of 1.4/1.5 aligned with the
+contract (data lands in `raw_*`; `staging` is a later layer).
+Not done / open: Olist Kaggle API download mode still never run live (only `--from-zip`). 1.3 (the 05:23 UTC schedule did not fire on its first day; owner decides on a manual run).
 Gotchas for the next agent: the enrichment workflow loads into a throwaway Postgres; there is no
 persistent warehouse yet, so Phase 2 must decide where the warehouse lives before loading for real.
 Files touched: CLAUDE.md, docs/PLAN.md, docs/PROGRESS.md
