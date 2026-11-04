@@ -132,8 +132,7 @@ GitHub Environment. The owner is the only contributor.
 
 **Consequences.** If the PAT leaked, it could also push to the public repo. Revisit before
 adding collaborators or making the project a team effort: split into two PATs (or a GitHub App)
-and move the secrets into an Environment restricted to `main` (done for the warehouse secret only, ADR-014,
-which also reuses `DATA_REPO_PAT` in a second workflow). Supersedes ADR-003's
+and move the secrets into an Environment restricted to `main`. Supersedes ADR-003's
 "PAT scoped to that repo only" wording.
 
 ## ADR-011 — psycopg 3 for PostgreSQL loads; raw Olist as one-transaction COPY (2026-11-03)
@@ -228,7 +227,8 @@ alongside Phase 2.
     parts stay inside one job (`GITHUB_ENV`, never job outputs).
   - `DATA_REPO_PAT` (existing, repo-level) to read the ML snapshots and the Olist archive from the data
     repo. Owner decision: reuse it instead of a new read-only PAT; this extends the ADR-010 accepted
-    risk to a second workflow.
+    risk to a second workflow, and partly carries out ADR-010's follow-up (only this secret moves
+    into an Environment). Past ADRs are not edited, so ADR-010 is read together with this one.
 - **Olist source:** the owner pushes the Kaggle `archive.zip` once to the private data repo (not
   redistributed; CC BY-NC-SA); the workflow reads it with `--from-zip`.
 - **Exposure:** only `marts` (aggregates) are served by the 2.4 API, through a separate read-only
