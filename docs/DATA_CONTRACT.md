@@ -304,10 +304,14 @@ Detailed tables are defined in tasks 2.1–2.3.
 | `marts` | dbt (`warehouse/models/marts/`) | tables | metrics (2.3, §4); the only schema the 2.4 API reads |
 
 dbt creates **exactly** these three schemas: `generate_schema_name` (warehouse/macros/) uses the
-folder's `+schema` verbatim (no `<target>_` prefix) and fails compilation for a model, seed or
-snapshot whose schema is anything else. The profile's target schema is `staging`, so even test
-failure tables (`--store-failures`) land there. CI checks after `dbt build` that no other schema
-appeared and that every `raw_*` relation and row count is unchanged.
+folder's `+schema` verbatim (no `<target>_` prefix) and fails parsing for a model, seed or
+snapshot whose schema is anything else, for a target schema outside the three, and for any node
+that sets the legacy `target_schema` / `target_database` (which would bypass the macro). The
+profile's target schema is `staging`, so even test failure tables (`--store-failures`) land there.
+The `on-run-start` hook `assert_node_schemas` re-checks every node's final schema and database
+before anything runs. CI checks after `dbt build` that no other schema appeared and that nothing
+in the `raw_*` schemas or `public` changed: relations (columns, types, row count, md5 of the rows),
+constraints, triggers, functions, types (ADR-016).
 
 Naming: `stg_<source>__<entity>` (sources `olist`, `enrichment`), `dim_<entity>`, `fact_<process>`.
 Every model states its grain in a leading comment and in its YAML description.
@@ -315,10 +319,11 @@ Every model states its grain in a leading comment and in its YAML description.
 ### Sources
 
 Declared in `warehouse/models/staging/<source>/_<source>__sources.yml` with **every** column of the
-raw table, in table order, with its type as printed by PostgreSQL `format_type()` (`text`,
-`character(3)`, `text[]`, ...). The singular test `assert_sources_match_contract` fails if a
-declared table's columns, order or types differ from the database, so the YAML, the loader DDL and
-§2/§2b must change together.
+raw table, in table order, with its type (`data_type`, required) as printed by PostgreSQL
+`format_type()` (`text`, `character(3)`, `text[]`, ...). The singular test
+`assert_sources_match_contract` fails if a declared table's columns, order or types differ from the
+database, or if a column has no `data_type`, so the YAML, the loader DDL and §2/§2b must change
+together.
 
 | dbt source | schema | tables |
 |------------|--------|--------|

@@ -250,17 +250,38 @@ them in `raw_*` breaks ADR-014 (raw schemas are owned by the loaders), and seeds
 have the loaders' DDL (`raw_enrichment` is typed, with a PK and a CHECK).
 
 **Decision.**
-- **Fixtures go through the real loaders.** `warehouse/fixtures/` holds synthetic Olist CSVs (contract
-  headers) and API-shaped JSON (a Frankfurter v1 response, Nager.Date v3 responses).
+- **Fixtures go through the real loaders.** `warehouse/fixtures/` holds Olist CSVs (contract
+  headers) and API-shaped JSON (a Frankfurter v1 response, Nager.Date v3 responses). The
+  transactional rows (orders, customers, sellers, ...) are synthetic; the reference values (3
+  category translations, the holidays, the FX rates) are real public facts.
   `python -m warehouse.ci.fixture_db load` feeds them to `ingestion.olist.load.prepare/load`,
   `fx_rates.parse_rates/load_rates` and `holidays.parse_holidays/load_holidays`, so CI tables have
   exactly the production DDL and the fixtures pass the loaders' validation. No dbt seeds. The
   warehouse fixtures are separate from the loader-test fixtures (`tests/olist/fixtures/`), so a
   loader edge case cannot break model tests and vice versa.
-- **Guards.** `generate_schema_name` allows only `staging`/`core`/`marts` for models, seeds and
-  snapshots (compile error otherwise). After the build, `fixture_db check` fails on any other schema
-  and on any change to a `raw_*` relation (added, dropped, row count). The singular test
-  `assert_sources_match_contract` compares the declared source columns and types with the database.
+- **Guards.**
+  - `generate_schema_name` allows only `staging`/`core`/`marts` for models, seeds and snapshots,
+    requires the target schema (used by tests and other nodes) to be one of them too, and rejects
+    the legacy `target_schema` / `target_database` configs on every node: dbt applies those
+    *after* the macro, so a snapshot with `schema='staging', target_schema='raw_olist'` would
+    otherwise be built in `raw_olist`. The macro runs at parse time, so `parse`, `compile` and
+    `build` all fail. Second check: the `on-run-start` hook `assert_node_schemas` reads every
+    node's final schema and database and stops the run before any node executes. (dbt creates
+    the schemas it needs just before on-run-start, and `dbt compile` skips hooks, which is why the
+    macro is the primary guard.) `tests/warehouse/test_dbt_guards.py` runs dbt on temp copies of
+    the project to prove each case.
+  - `fixture_db load` replaces raw table contents, so it refuses (exit 2, nothing written) unless
+    `FIXTURE_DB_ALLOW=1` (set only on that CI step), and whenever a table it writes already has
+    more rows than the fixtures (e.g. the ~100k real `raw_olist.orders`), even with the opt-in.
+  - After the build, `fixture_db check` fails on any schema besides staging/core/marts and on any
+    change in the `raw_*` schemas or `public` relative to the post-load inventory: relations
+    (kind; column names, order and `format_type()` types; row count; md5 of all rows as text in a
+    sorted order; view and index definitions), constraints, triggers, functions and standalone
+    types. A same-count `UPDATE`, an `ADD COLUMN`, a function in `raw_olist` or a table in
+    `public` all fail it. The rows are hashed in full, which is fine for fixtures; this check is
+    not meant for the real warehouse.
+  - The singular test `assert_sources_match_contract` compares the declared source columns,
+    order and types with the database; a column without `data_type` is itself a failure row.
 - **Profile.** `warehouse/profiles.yml` reads only `env_var()`: `DBT_PG_HOST`, `DBT_PG_PORT`,
   `DBT_PG_USER`, `DBT_ENV_SECRET_PG_PASSWORD`, `DBT_PG_DBNAME`, `DBT_PG_SSLMODE`, defaulting to a local
   trust-auth server (`localhost:5432`, `postgres`, no password, `ecommerce`, `prefer`). Not libpq's

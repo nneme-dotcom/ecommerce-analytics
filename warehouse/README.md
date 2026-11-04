@@ -7,11 +7,12 @@ defined in DATA_CONTRACT §3, metrics in §4.
 ```
 dbt_project.yml        project config; the folder decides the schema (+schema per folder)
 profiles.yml           connection, env vars only (no secrets in the repo)
-macros/                generate_schema_name: only staging, core, marts are allowed
+macros/                generate_schema_name: only staging, core, marts are allowed (parse time);
+                       assert_node_schemas: on-run-start re-check of every node's final schema
 models/staging/<src>/  _<src>__sources.yml (raw declarations), stg_<src>__<entity>.sql
 tests/                 assert_sources_match_contract.sql + generic tests (tests/generic/)
-fixtures/              synthetic raw data for CI (loaded by the real loaders, ADR-016)
-ci/fixture_db.py       CI helper: load fixtures / check that dbt left raw_* alone
+fixtures/              raw data for CI (loaded by the real loaders, ADR-016; see its README)
+ci/fixture_db.py       CI helper: load fixtures / check that dbt left raw_* and public alone
 ```
 
 ## Run locally against a throwaway PostgreSQL
@@ -23,10 +24,14 @@ pip install -r requirements.txt -r requirements-dbt.txt
 export DATABASE_URL=postgresql://postgres@localhost:5432/warehouse_ci      # loaders + fixture helper
 export DBT_PG_HOST=localhost DBT_PG_PORT=5432 DBT_PG_USER=postgres DBT_PG_DBNAME=warehouse_ci
 # export DBT_ENV_SECRET_PG_PASSWORD=...   only if the server needs a password
-python -m warehouse.ci.fixture_db load  --inventory /tmp/raw_inventory.json
+FIXTURE_DB_ALLOW=1 python -m warehouse.ci.fixture_db load --inventory /tmp/raw_inventory.json
 dbt build --project-dir warehouse --profiles-dir warehouse
 python -m warehouse.ci.fixture_db check --inventory /tmp/raw_inventory.json
 ```
+
+`load` replaces raw table contents, so it refuses (exit 2) without `FIXTURE_DB_ALLOW=1` and
+whenever a table it writes already has more rows than the fixtures (a real load). The dbt guard
+tests (`pytest tests/warehouse`, needs dbt) run dbt on temporary copies of this project.
 
 Profile variables (all optional): `DBT_PG_HOST` (localhost), `DBT_PG_PORT` (5432), `DBT_PG_USER`
 (postgres), `DBT_ENV_SECRET_PG_PASSWORD` (empty), `DBT_PG_DBNAME` (ecommerce), `DBT_PG_SSLMODE`

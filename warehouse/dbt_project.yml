@@ -15,6 +15,11 @@ clean-targets: ["target", "logs"]
 flags:
   send_anonymous_usage_stats: false
 
+# Re-checks, before any node runs, that every node resolved to staging/core/marts in the target
+# database (ADR-016). generate_schema_name already fails at parse time; this is the second check.
+on-run-start:
+  - "{{ assert_node_schemas() }}"
+
 # The folder decides the schema; generate_schema_name rejects anything else (macros/), so a model
 # in a folder without a +schema here fails to compile. Uncomment core/marts with their first model
 # (tasks 2.1 / 2.3): dbt warns about configuration paths that match no model.

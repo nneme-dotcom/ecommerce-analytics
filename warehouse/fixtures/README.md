@@ -1,8 +1,17 @@
-# Warehouse fixtures (synthetic)
+# Warehouse fixtures
 
-Hand-made, **synthetic** rows (not real Olist, ECB or Nager.Date data) for the CI `dbt build`
-(ADR-016). `python -m warehouse.ci.fixture_db load` loads them into a throwaway PostgreSQL with the
-real loaders, so the raw tables have exactly the DDL of DATA_CONTRACT §2 and §2b:
+Raw data for the CI `dbt build` (ADR-016), of two kinds:
+
+- **Transactional rows are synthetic**: the orders, customers, sellers, products, order items,
+  payments, reviews and geolocation rows are hand-made (made-up ids, dates and amounts), not
+  copied from the Olist dataset.
+- **Reference values are real public facts**: the 3 product category translations (Olist's
+  Portuguese name and its English translation), the public holidays (Nager.Date) and the
+  EUR-based FX rates (ECB reference rates via Frankfurter) are the published values for their
+  dates, in the APIs' response shape.
+
+`FIXTURE_DB_ALLOW=1 python -m warehouse.ci.fixture_db load` loads them into a throwaway
+PostgreSQL with the real loaders, so the raw tables have exactly the DDL of DATA_CONTRACT §2 and §2b:
 
 | folder / file | loaded by | into |
 |---------------|-----------|------|

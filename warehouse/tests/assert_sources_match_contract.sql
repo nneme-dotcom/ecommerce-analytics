@@ -2,13 +2,15 @@
     Contract conformance of every declared source table (DATA_CONTRACT §2, §2b).
 
     The columns declared in models/**/_*__sources.yml must be exactly the columns of the raw table
-    in the database: same names, same order, and the same type when `data_type` is declared
-    (compared with format_type(), e.g. `text`, `character(3)`, `text[]`). Raw tables are owned by
+    in the database: same names, same order, and the same type. Every column must declare
+    `data_type` (compared with format_type(), e.g. `text`, `character(3)`, `text[]`); a column
+    without one is a failure, so a type can never go unchecked. Raw tables are owned by
     the Python loaders, so a failure here means the source YAML, the loader DDL and the contract
     disagree: fix all three together.
 
     Returns one row per problem: a declared column missing from the table, an undeclared column
-    in the table, a column at the wrong position, or a different type. A declared table that does
+    in the table, a column at the wrong position, a column with no declared `data_type`, or a
+    different type. A declared table that does
     not exist shows up as all of its columns missing.
 -#}
 {%- set expected_rows = [] -%}
@@ -73,7 +75,8 @@ compared as (
             when a.column_name is null then 'declared but missing in the database'
             when e.column_name is null then 'in the database but not declared'
             when e.position <> a.position then 'wrong position'
-            when e.data_type is not null and e.data_type <> a.data_type then 'wrong type'
+            when e.data_type is null then 'no data_type declared'
+            when e.data_type <> a.data_type then 'wrong type'
         end as problem
     from expected as e
     full outer join actual as a
