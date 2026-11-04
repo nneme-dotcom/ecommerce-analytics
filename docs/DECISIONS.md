@@ -198,3 +198,46 @@ Migrate to v4 before 2027-01-31 once its API is verified live (PLAN 1.7).
 **Consequences.** `raw_enrichment.public_holidays` columns follow v3 (`local_name`, `is_global`,
 `counties`, `holiday_types`, `is_fixed`, `launch_year`). The v4 migration will change them, with a
 contract update in the same PR. The FX part of ADR-012 still stands.
+
+## ADR-014 — Warehouse on managed PostgreSQL (Neon), transformations in dbt (2026-11-04)
+
+**Context.** Phase 1 loads raw data only into throwaway databases (CI service containers, the manual
+enrichment workflow). Phase 2 needs a persistent warehouse that GitHub Actions can write to and the
+Phase 2.4 API can read from. The owner reviewed Phase 1 and approved it, with tasks 1.6/1.8 done
+alongside Phase 2.
+
+**Decision (owner).**
+- **Neon free plan** (managed PostgreSQL 16), one project in an EU region. Limits checked on
+  2026-11-04 (neon.com/docs/introduction/free-tier, page updated 2026-10-23; re-confirmed during review): 1 GB storage per project, 100 CU-hours per month,
+  compute suspends after 5 min idle.
+- **The data repo stays the system of record** (ADR-003 is not reopened): every raw schema in Neon
+  (`raw_olist`, `raw_enrichment`, `raw_mercadolibre`) can be dropped and rebuilt from the data repo and
+  the public APIs. Raw schemas are owned by the Python loaders; dbt reads them as sources only.
+- **dbt** (`dbt-core` + `dbt-postgres`, pinned in `requirements-dbt.txt`, separate from the runtime
+  `requirements.txt`) builds exactly three schemas: `staging` (views), `core` (star schema, tables) and
+  `marts` (tables); `generate_schema_name` is overridden so dbt never prefixes them. `dbt-postgres`
+  brings `psycopg2`; it is used only by dbt (loaders keep psycopg 3, ADR-011). CI runs `dbt build`
+  against a throwaway PostgreSQL with small fixtures and **receives no secrets**.
+- **Secrets used by the warehouse workflow:**
+  - `WAREHOUSE_DATABASE_URL` (direct, non-pooled Neon connection string, `sslmode=require`), stored in
+    a GitHub **Environment `warehouse` restricted to `main`**, created by the owner in the GitHub UI.
+    Loader steps receive it as `DATABASE_URL`. dbt takes separate profile fields, so the URL is split
+    by a Python step that first emits `::add-mask::` for every derived part (password, user, host);
+    no shell parsing, no `set -x`. Both the percent-encoded and the decoded password are masked, and the
+    parts stay inside one job (`GITHUB_ENV`, never job outputs).
+  - `DATA_REPO_PAT` (existing, repo-level) to read the ML snapshots and the Olist archive from the data
+    repo. Owner decision: reuse it instead of a new read-only PAT; this extends the ADR-010 accepted
+    risk to a second workflow, and partly carries out ADR-010's follow-up (only this secret moves
+    into an Environment). Past ADRs are not edited, so ADR-010 is read together with this one.
+- **Olist source:** the owner pushes the Kaggle `archive.zip` once to the private data repo (not
+  redistributed; CC BY-NC-SA); the workflow reads it with `--from-zip`.
+- **Exposure:** only `marts` (aggregates) are served by the 2.4 API, through a separate read-only
+  database role, never the loader credential. Offer-level rows (`core.fact_offer_snapshot`) are not
+  exposed, so raw ML data is not republished (ADR-003).
+
+**Consequences.** One more account and one Environment secret (owner). Storage estimate: raw ≈ 0.3 GB
+(Olist text tables incl. 1 M geolocation rows), `core`/`marts` add roughly as much again; ML grows by
+≈ 2.3 k offers per day (≈ 0.85 M rows per year). Staging as views and a `pg_database_size` line in the
+workflow summary keep this visible. 100 CU-hours a month cannot keep a compute awake all month, so the
+API must tolerate cold starts and must not keep Neon awake. If limits are hit, the dbt project runs
+unchanged on any PostgreSQL; Phase 4 (AWS) may move the warehouse without changing the layout.
