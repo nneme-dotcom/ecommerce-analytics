@@ -19,6 +19,10 @@ mercadolibre/snapshot_date=YYYY-MM-DD/
   trends.jsonl.gz           one line per trending keyword
 ```
 
+The storage root is the private data repo `nneme-dotcom/ecommerce-analytics-data` (`main`). Its
+top level holds `mercadolibre/` (above), `.gitignore` (written by the job) and `olist/archive.zip`
+(the Olist source archive, §2; added by the owner, read by the warehouse workflow, task 2.6).
+
 Every line carries `snapshot_date`, `run_id` and `captured_at` (UTC ISO-8601, e.g. `2026-11-03T06:00:12Z`;
 the time the source response was received — for offers, the first page of that product).
 
@@ -270,6 +274,18 @@ The archive must contain **exactly** the nine CSVs, at its root (anything else, 
 entries → refused, nothing written). Files are moved into place only after all of them extracted
 with a valid CRC; `manifest.json` is written last.
 
+### The archive in the data repo (task 2.6, ADR-014, ADR-017)
+
+The Kaggle `archive.zip` (44,717,580 bytes on 2026-11-03) is stored once by the owner in the
+private data repo `nneme-dotcom/ecommerce-analytics-data` at **`olist/archive.zip`** (a regular git
+file, not Git LFS), next to `mercadolibre/`. It is never copied into this public repo. The warehouse
+workflow unpacks it with `--from-zip` into `$RUNNER_TEMP/olist` (the manifest above, with
+`archive_sha256`, is written there), logs its size and SHA-256 and shows `archive_sha256` in the
+job summary; the per-CSV SHA-256s land in `raw_olist._load_audit` (the durable record). The next
+daily run reloads `raw_olist` when the SHA-256 of any of the nine CSVs inside the archive differs
+from its latest `_load_audit.file_sha256`: a new commit to that path that changes a CSV triggers
+it, while repacking the archive with byte-identical CSVs (a different archive hash) does not.
+
 ### Schema `raw_olist` (task 1.4, `python -m ingestion.olist.load`)
 
 Rules:
@@ -425,6 +441,26 @@ The `on-run-start` hook `assert_node_schemas` re-checks every node's final schem
 before anything runs. CI checks after `dbt build` that no other schema appeared and that nothing
 in the `raw_*` schemas or `public` changed: relations (columns, types, row count, md5 of the rows),
 constraints, triggers, functions, types (ADR-016).
+
+### The warehouse on Neon (task 2.6, ADR-014, ADR-017)
+
+One Neon project (EU, Frankfurt; free plan), one database, reached only from the GitHub Actions
+workflow `warehouse-load.yml` through the Environment `warehouse` secret `WAREHOUSE_DATABASE_URL`
+(direct, non-pooled, `sslmode=require`, optionally `channel_binding=require`). The database holds
+exactly the six schemas of the table above plus PostgreSQL's own (`public` stays empty):
+
+| schema | loaded by (workflow step) | daily run | `full` run |
+|--------|---------------------------|-----------|------------|
+| `raw_mercadolibre` | `python -m ingestion.mercadolibre.load --source <data repo>` | always (unchanged days skipped, ADR-015) | always |
+| `raw_olist` | `ingestion.olist.download --from-zip <data repo>/olist/archive.zip`, then `ingestion.olist.load` | only if a CSV in the archive differs from the last `_load_audit` hash, or never loaded | always |
+| `raw_enrichment` | `ingestion.enrichment.fx_rates`, `ingestion.enrichment.holidays` (defaults) | only if never loaded, or `public_holidays` has no `AR` row for the current UTC year | always |
+| `staging`, `core`, `marts` | `dbt build --project-dir warehouse --profiles-dir warehouse` | after the loads | after the loads |
+
+Daily runs are chained after each successful *ML daily snapshot* run; `full` is a manual dispatch.
+The Olist and enrichment loads run even if the ML load failed; `dbt build` runs only if every load
+that was attempted succeeded, and any failed load fails the run (ADR-017).
+The job summary reports row counts per raw table, ML days loaded, dbt result counts and
+`pg_database_size` (counts only). Every raw schema can be dropped and rebuilt with one `full` run.
 
 Naming: `stg_<source>__<entity>` (sources `olist`, `enrichment`), `dim_<entity>`, `fact_<process>`.
 Every model states its grain in a leading comment and in its YAML description.

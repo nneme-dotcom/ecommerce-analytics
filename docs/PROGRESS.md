@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.6 Neon load workflow (owner prerequisites done 2026-11-04: Neon project in EU Frankfurt (PostgreSQL version not yet confirmed), Environment `warehouse` with `WAREHOUSE_DATABASE_URL`, `olist/archive.zip` in the data repo), then 2.1. Follow-ups 1.6–1.11 alongside. Keep watching the daily ML runs for 1.3.
+- **Next up:** 2.6 Neon load workflow is `in review` (branch `devops/warehouse-load`); after merge, its first live run (dispatch `mode=full`) is the 2.6 acceptance. Then 2.1. Follow-ups 1.6–1.11 alongside. Keep watching the daily ML runs for 1.3. Neon PostgreSQL version not yet confirmed (the first run's log does not show it; check in the Neon console).
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,105 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-04 — devops — 2.6 (branch `devops/warehouse-load`)
+Done: `.github/workflows/warehouse-load.yml` ("Warehouse load"): `workflow_run` after each
+successful *ML daily snapshot* of main (mode `daily`) + `workflow_dispatch` (`mode: daily | full`).
+Job: `if` main only (and, for workflow_run, conclusion success / head branch main / same repo),
+`environment: warehouse`, `permissions: contents: read`, job-level concurrency
+`warehouse-load-<ref>` without cancel-in-progress, job timeout 60 min and a timeout on every step,
+`persist-credentials: false` on the (only) `actions/checkout`. The data repo is fetched by `git init`
++ shallow `git fetch` with `DATA_REPO_PAT` as an env-only `http.extraheader` (never URL, argv or
+`.git/config`; ADR-009 push pattern). Steps: split URL → load `raw_mercadolibre` → plan → (Olist) →
+(FX, holidays) → `dbt build` → summary. `daily` loads `raw_olist` only when a CSV in
+`olist/archive.zip` differs from the last `raw_olist._load_audit` hash (or never loaded), and
+`raw_enrichment` only when never loaded; `full` loads all three. New `scripts/warehouse_env.py`
+(stdlib): parses `WAREHOUSE_DATABASE_URL`, prints `::add-mask::` for user, password (encoded and
+decoded; `%` values escaped and raw), host (as written and lower-cased), the endpoint id and dbname,
+then writes `DBT_PG_*`, `DBT_ENV_SECRET_PG_PASSWORD`, `DBT_PG_CHANNEL_BINDING` to `$GITHUB_ENV`
+(heredocs); refuses missing parts, control chars, multi-host, sslmode other than `require`,
+unknown query params; never prints a value, never uses outputs. New `scripts/warehouse_report.py`
+(`plan`, `summary`; run as `python -m scripts.warehouse_report`, it imports `ingestion`): summary =
+step outcomes, row counts per raw table, ML days, dbt counts by type/status + failing node ids,
+`pg_database_size` + per-schema size, Olist `archive_sha256`; warning at 80 % of 1 GB.
+channel_binding: dbt-postgres 1.11 has no profile field; psycopg2-binary 2.9.13 bundles libpq 17,
+which reads `PGCHANNELBINDING`; exported in the dbt step only, always a valid keyword (empty is
+fatal in libpq). ADR-017; DATA_CONTRACT §1 (data repo top level), §2 (`olist/archive.zip`), §3
+(warehouse on Neon: schemas, loaders, daily vs full). PLAN 2.6 → `in review`.
+Validation (no Neon, no secrets): actionlint 1.7.12 (release tarball, sha256 verified against the
+release checksums) on all five workflows: 0 errors; shellcheck 0.11.0 (PyPI `shellcheck-py` wheel,
+`--require-hashes`) on every extracted `run:` block: clean at default severity (with
+`--enable=all`: only style hints and env-provided variables). Local end-to-end on PostgreSQL 16
+with TLS (self-signed) + a SCRAM role, URL with a percent-encoded `p@ss:...%...` password,
+`sslmode=require&channel_binding=require`: split → `$GITHUB_ENV` parsed like the runner → fixture
+load through the loaders with that URL → `dbt build` PASS=38 with `PGCHANNELBINDING=require` (only
+possible with SCRAM channel binding over TLS) and `prefer`; `dbt debug` fails with an empty value
+("invalid channel_binding value") and with `require` without TLS ("channel binding required, but
+SSL not in use"), proving dbt's libpq reads it; summary rendered with no user/host/dbname/password.
+That dbt error message quoted the host, so host masking is load-bearing. Tests: 45 in
+`tests/test_warehouse_env.py`, 21 in `tests/test_warehouse_report.py` (plan decisions on fixture
+loads: empty, unchanged, changed CSV, unreadable/missing archive, dropped tables, partial audit;
+CLI outputs booleans only; DB errors print the type only). `ruff check .` clean; full `pytest`
+(with dbt installed): 374 passed, 2 skipped (Olist real data). Throwaway cluster (non-root user
+`claude`, /tmp, free port) deleted.
+Not done / open: never run on GitHub (needs the Environment secret). Acceptance "first full run
+builds green on the real data" is checked after merge: `gh workflow run warehouse-load.yml --ref
+main -f mode=full`. Risks for that run: (1) the URL may carry a query parameter besides
+`sslmode`/`channel_binding` (the split step then fails naming the key; drop it from the secret or
+allow it in the script); (2) `olist/archive.zip` stored via LFS fails with a clear error;
+(3) Neon cold start: loaders have no connect timeout (bounded by the step timeout), dbt has 10 s
+and 1 retry; (4) loader and dbt error messages are printed by those tools: the masks cover the URL
+parts, but a COPY error from the Olist loader can still quote a (public) Olist value, and a dbt
+SQL error could quote a raw value; (5) a pending `full` dispatch can be displaced by a chained
+`daily` run (re-dispatch); (6) masking a short dbname (e.g. `neondb`) also stars it inside other
+words in logs (cosmetic).
+Proposed CLAUDE.md Commands rows (orchestrator):
+- `| Load the Neon warehouse and dbt build (main only, Environment warehouse; chained after each successful ML snapshot as mode daily) | gh workflow run warehouse-load.yml --ref main -f mode=full (or -f mode=daily; watch: gh run watch) |`
+- `| Split a warehouse URL into the dbt profile variables, masked (GitHub Actions only; env WAREHOUSE_DATABASE_URL, GITHUB_ENV) | python scripts/warehouse_env.py |`
+- `| Decide the optional raw loads / write the warehouse job summary (env DATABASE_URL) | python -m scripts.warehouse_report plan --mode daily\|full --olist-zip <data-repo>/olist/archive.zip · python -m scripts.warehouse_report summary --mode <m> [--run-results warehouse/target/run_results.json] [--olist-manifest <dir>/manifest.json] |`
+and the exit-code line "warehouse_env.py exits 0 ok, 2 URL missing/malformed/not allowed;
+warehouse_report exits 0 ok, 1 database/input error, 2 configuration error".
+Gotchas for the next agent: the `workflow_run` filter matches the snapshot workflow's `name:`
+("ML daily snapshot"); renaming it silently stops the chain. `scripts.warehouse_report` must be run
+with `-m` from the repo root (namespace package, imports `ingestion`). A new raw schema needs a
+row in the summary's `RAW_SCHEMAS` and a load step. `DBT_PG_CHANNEL_BINDING` is not a profile
+variable: only the dbt step maps it to `PGCHANNELBINDING`. 2.1 can use the first full run as its
+"full real load" (PLAN 2.1).
+Files touched: .github/workflows/warehouse-load.yml (new), scripts/warehouse_env.py (new),
+scripts/warehouse_report.py (new), tests/test_warehouse_env.py (new),
+tests/test_warehouse_report.py (new), docs/DATA_CONTRACT.md (§1, §2, §3), docs/DECISIONS.md
+(ADR-017), docs/PLAN.md, docs/PROGRESS.md
+
+Review round 1 (PR #13 approved with low findings; fixed in 924c72c, round 2 APPROVE): L1
+`warehouse_env.py` now refuses, before `urlsplit`, whitespace or any control character (Unicode
+`Cc`, so C1 too) in the URL after the same `.strip()` as the loaders, and refuses a netloc with
+more than one `@` (Python splits user info at the last `@`, libpq at the first; it now splits at
+the only one). Messages name the problem only. Nit 1: port 0 refused; `5432 if port is None else
+port`. Nit 2: every `::error` in both scripts goes through `escape_command_data` (new
+`warehouse_env.error_command`, reused by `warehouse_report`); tests with a query key holding a
+decoded newline, CRLF and a literal `%0A`. L3: `plan` also loads `raw_enrichment` on a daily run
+when `public_holidays` has no `AR` row for the current UTC year (one `EXISTS` read, no API call;
+`utc_today()` / `decide(today=...)` injectable; test proves the plan works on a read-only
+session). L4: plan and the Olist/FX/holidays steps run when the ML load failed (`!cancelled()` and
+`steps.ml.outcome` is `success` or `failure`, so a failed setup step still stops everything) and
+depend only on the plan; `dbt build` runs only if ML and plan succeeded and Olist/FX/holidays are
+`success` or `skipped`; any failed step keeps the job red. L2: ADR-017 sentence on the archive
+sha256 (log + summary) vs the durable per-CSV `file_sha256`. Nit 4: DATA_CONTRACT §2 says a CSV
+hash change triggers the reload and a repack with identical CSVs does not. Nit 3 left as is
+(accepted). ADR-017 (modes, archive, URL split, failure handling, consequences) and DATA_CONTRACT
+§2/§3 updated. PLAN 2.6 stays `in review` until the first live `mode=full` run.
+Validation: `ruff check .` clean; full `pytest` with `requirements-dbt.txt` installed (dbt-core 1.12.6,
+dbt-postgres 1.11.0) against a real PostgreSQL 16 (initdb as non-root `claude` under /tmp, free port,
+deleted afterwards): 399 passed, 2 skipped (Olist real data); `tests/test_warehouse_env.py` 65
+(+20), `tests/test_warehouse_report.py` 26 (+5). actionlint 1.7.12 (release tarball, sha256
+verified against the release checksums file) clean on all workflows; shellcheck not available in
+this session, so the changed `run:` blocks were not re-shellchecked (only `if:` conditions and
+comments changed in the workflow, no shell).
+Gotcha: if the January holidays load fails (Nager.Date down), every daily run retries it and stays
+red until it succeeds; that is intended (loud), not a loop to silence.
+Files touched (round 1): .github/workflows/warehouse-load.yml, scripts/warehouse_env.py,
+scripts/warehouse_report.py, tests/test_warehouse_env.py, tests/test_warehouse_report.py,
+docs/DECISIONS.md (ADR-017), docs/DATA_CONTRACT.md (§2, §3), docs/PROGRESS.md
 
 ### 2026-11-04 — analytics-engineer — 2.0 (branch `warehouse/dbt-skeleton`)
 Done: dbt project in `warehouse/`: `dbt_project.yml` (`staging` views; `core`/`marts` blocks
