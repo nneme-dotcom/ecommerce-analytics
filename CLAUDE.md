@@ -87,6 +87,13 @@ Filled in as each area is built. Keep this section accurate.
 | Trigger the scheduled ML snapshot manually (runs daily at 05:23 UTC; main only) | `gh workflow run ml-daily-snapshot.yml --ref main` (watch: `gh run watch`) |
 | Render a run's job summary / exit-code message locally | `python scripts/summarize_run.py summary --run-json <path>/run.json --exit-code <code>` · `python scripts/summarize_run.py check --exit-code <code>` |
 | Check the Actions secrets (manual, never prints values, never spends the refresh token) | Actions tab → *Check secrets* → Run workflow, or `gh workflow run check-secrets.yml --ref main` |
+| Download Olist CSVs (Kaggle REST, env `KAGGLE_USERNAME`, `KAGGLE_KEY`; or a local zip) | `python -m ingestion.olist.download --dest data/olist [--from-zip <path>]` |
+| Load Olist CSVs into `raw_olist` (env `DATABASE_URL`) | `python -m ingestion.olist.load --source data/olist` |
+| Load ECB FX rates (EUR→BRL,USD, Frankfurter v1) into `raw_enrichment.fx_rates` (env `DATABASE_URL`, not needed with `--csv-out` only) | `python -m ingestion.enrichment.fx_rates [--start 2016-09-01] [--end YYYY-MM-DD] [--csv-out <file>]` |
+| Load public holidays (Nager.Date v3; BR 2016–2018, AR 2026→next year) into `raw_enrichment.public_holidays` (env `DATABASE_URL`, not needed with `--csv-out` only) | `python -m ingestion.enrichment.holidays [--only CC:YYYY[-YYYY]] [--csv-out <file>]` |
+| Run both enrichment loads live into a throwaway Postgres (manual, no secrets) | `gh workflow run enrichment-load.yml --ref main` (watch: `gh run watch`) |
+
+Olist and enrichment loaders exit 0 ok, 1 fetch/validation/load failed (nothing changed), 2 configuration error.
 
 Snapshot exit codes (ADR-008; the scheduled workflow branches on these):
 
