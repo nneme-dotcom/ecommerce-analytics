@@ -9,14 +9,18 @@ type only, because a libpq message can quote the host):
     when its input changed: the SHA-256 of any of the nine CSVs inside the archive differs from the
     latest ``raw_olist._load_audit`` row of its table, or a table / the audit is missing. It runs
     ``raw_enrichment`` only when it was never loaded (no audit row or table for ``fx_rates`` or
-    ``public_holidays``); its inputs are fixed historical ranges, refreshed by a ``full`` run.
-    Read-only on the database.
+    ``public_holidays``) or when ``public_holidays`` has no AR row for the current UTC year (so the
+    new AR holiday year arrives on the first daily run of January); otherwise its inputs are fixed
+    historical ranges, refreshed by a ``full`` run. Read-only and cheap: catalog lookups, the
+    audit rows and one ``EXISTS`` over the (few hundred rows of) ``public_holidays``; no API call.
 
 ``summary --mode ... [--run-results <dbt run_results.json>] [--olist-manifest <manifest.json>]``
     Appends a Markdown summary to ``$GITHUB_STEP_SUMMARY``: row counts per raw table, ML days
     loaded, dbt result counts by resource type and status (plus the ids of failing nodes, which are
     project code, not data), ``pg_database_size`` and size per schema, and the Olist archive
     SHA-256 when it was loaded. Counts and names only: no row content, host, database name or URL.
+
+Every ``::error`` message is escaped (``scripts.warehouse_env.error_command``).
 
 Exit codes: 0 ok, 1 database or input error (the step fails loudly), 2 usage/configuration error.
 """
@@ -31,6 +35,7 @@ import sys
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +43,7 @@ from ingestion.db import ConfigError, connect, database_url_from_env
 from ingestion.olist.files import AUDIT_TABLE as OLIST_AUDIT
 from ingestion.olist.files import OLIST_FILES
 from ingestion.olist.files import RAW_SCHEMA as OLIST_SCHEMA
+from scripts.warehouse_env import error_command
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -46,6 +52,9 @@ EXIT_CONFIG = 2
 RAW_SCHEMAS = ("raw_olist", "raw_enrichment", "raw_mercadolibre")
 DBT_SCHEMAS = ("staging", "core", "marts")
 ENRICHMENT_TABLES = ("fx_rates", "public_holidays")
+# Mercado Libre's country: its holidays must cover the current year (ingestion.enrichment.holidays
+# loads AR from 2026 to next year by default).
+CURRENT_YEAR_COUNTRY = "AR"
 CHUNK = 1 << 20
 # Neon free plan: 1 GB storage per project (ADR-014). pg_database_size is a lower bound of what
 # Neon bills (history/WAL retention comes on top), so warn early.
@@ -116,7 +125,22 @@ def enrichment_loaded(cur) -> bool:
     return all(t in found for t in ENRICHMENT_TABLES)
 
 
-def decide(mode: str, zip_path: Path, cur) -> Plan:
+def utc_today() -> date:
+    return datetime.now(UTC).date()
+
+
+def holidays_cover_year(cur, country: str, year: int) -> bool:
+    """True if ``raw_enrichment.public_holidays`` has a row for ``country`` in ``year``."""
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM raw_enrichment.public_holidays"
+        " WHERE country_code = %s AND holiday_date >= %s AND holiday_date < %s)",
+        (country, date(year, 1, 1), date(year + 1, 1, 1)),
+    )
+    return bool(cur.fetchone()[0])
+
+
+def decide(mode: str, zip_path: Path, cur, today: date | None = None) -> Plan:
+    """The load plan. ``today`` (UTC) is injectable for tests."""
     if mode == "full":
         return Plan(True, True, ["mode full: every raw schema is loaded"])
     plan = Plan(False, False)
@@ -139,11 +163,20 @@ def decide(mode: str, zip_path: Path, cur) -> Plan:
             plan.reasons.append("raw_olist: archive content changed since the last load: loading")
         else:
             plan.reasons.append("raw_olist: unchanged (all nine CSV hashes match the last load)")
-    if enrichment_loaded(cur):
-        plan.reasons.append("raw_enrichment: already loaded (refresh with mode full)")
-    else:
+    year = (today or utc_today()).year
+    if not enrichment_loaded(cur):
         plan.enrichment = True
         plan.reasons.append("raw_enrichment: never loaded (or a table is missing): loading it")
+    elif not holidays_cover_year(cur, CURRENT_YEAR_COUNTRY, year):
+        plan.enrichment = True
+        plan.reasons.append(
+            f"raw_enrichment: no {CURRENT_YEAR_COUNTRY} holidays for {year} yet: loading it"
+        )
+    else:
+        plan.reasons.append(
+            f"raw_enrichment: already loaded, {CURRENT_YEAR_COUNTRY} {year} covered "
+            "(refresh with mode full)"
+        )
     return plan
 
 
@@ -238,7 +271,7 @@ def render_summary(
         out.append("")
     if db_error:
         out += [f"Database not reachable for the summary ({db_error}).", ""]
-        notes.append(f"::error title=Warehouse summary::database not reachable ({db_error})")
+        notes.append(error_command(f"database not reachable ({db_error})", "Warehouse summary"))
     if rows is not None:
         out += ["#### Raw tables", "", "| table | rows |", "|-------|-----:|"]
         out += [f"| `{s}.{t}` | {n:,} |" for s, t, n in rows] or ["| (none) | 0 |"]
@@ -315,7 +348,7 @@ def main(argv: list[str] | None = None, environ: dict[str, str] | None = None) -
     try:
         url = database_url_from_env()
     except ConfigError as exc:
-        print(f"::error::{exc}")
+        print(error_command(str(exc), "Warehouse load"))
         return EXIT_CONFIG
 
     if args.command == "plan":
@@ -323,7 +356,7 @@ def main(argv: list[str] | None = None, environ: dict[str, str] | None = None) -
             with connect(url) as conn, conn.cursor() as cur:
                 plan = decide(args.mode, args.olist_zip, cur)
         except Exception as exc:  # noqa: BLE001 - message may quote the host: type only
-            print(f"::error title=Warehouse plan::database error ({_db_error(exc)})")
+            print(error_command(f"database error ({_db_error(exc)})", "Warehouse plan"))
             return EXIT_FAILED
         for reason in plan.reasons:
             print(reason)

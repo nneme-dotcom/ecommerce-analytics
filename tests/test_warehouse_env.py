@@ -80,9 +80,61 @@ def test_percent_encoded_password_is_decoded_and_both_forms_are_masked():
     assert encoded in secrets and "p@ss:w/o%rd x" in secrets
 
 
-def test_unencoded_at_sign_in_password_splits_on_the_last_at():
-    p = we.parse_url(f"postgresql://u:pa@ss@{FAKE_HOST}/db?sslmode=require")
+def test_percent_encoded_at_sign_in_password_is_accepted():
+    p = we.parse_url(f"postgresql://u:pa%40ss@{FAKE_HOST}/db?sslmode=require")
     assert (p.user, p.password, p.host) == ("u", "pa@ss", FAKE_HOST)
+
+
+@pytest.mark.parametrize(
+    "netloc",
+    [
+        f"s3cr3tuser:Pw1@Pw2s3cr3t@{FAKE_HOST}",  # Python: last '@', libpq: first
+        f"s3cr3tuser@x:S3cr3tPw@{FAKE_HOST}",
+        f"s3cr3tuser:S3cr3tPw@@{FAKE_HOST}",
+        f"s3cr3tuser:S3cr3tPw@S3cr3tPw2@{FAKE_HOST}",
+    ],
+)
+def test_more_than_one_at_sign_is_refused_without_values(netloc):
+    with pytest.raises(we.ConfigError) as info:
+        we.parse_url(f"postgresql://{netloc}/db?sslmode=require")
+    message = str(info.value)
+    assert "more than one '@'" in message
+    assert not any(bit in message.lower() for bit in ("s3cr3t", "pw1", "ep-fake", "neon"))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"postgresql://s3cr3tuser:S3cr3t Pw@{FAKE_HOST}/db?sslmode=require",  # a space
+        f"postgresql://s3cr3tuser:S3cr3t\tPw@{FAKE_HOST}/db?sslmode=require",  # dropped by urlsplit
+        f"postgresql://s3cr3tuser:S3cr3t\nPw@{FAKE_HOST}/db?sslmode=require",  # ... and \n
+        f"postgresql://s3cr3tuser:S3cr3tPw@{FAKE_HOST}/d\rb?sslmode=require",
+        f"postgresql://s3cr3tuser:S3cr3tPw@{FAKE_HOST}/db?sslmode=require\x00",
+        f"postgresql://s3cr3tuser:S3cr3t\x7fPw@{FAKE_HOST}/db?sslmode=require",
+        f"postgresql://s3cr3tuser:S3cr3t\x85Pw@{FAKE_HOST}/db?sslmode=require",  # C1 control (NEL)
+        f"postgresql://s3cr3tuser:S3cr3t\u00a0Pw@{FAKE_HOST}/db?sslmode=require",  # no-break space
+        f"postgresql://s3cr3tuser:S3cr3tPw@{FAKE_HOST}/s3cr3tdb ?sslmode=require",
+    ],
+)
+def test_raw_whitespace_or_control_characters_are_refused_before_parsing(url):
+    with pytest.raises(we.ConfigError) as info:
+        we.parse_url(url)
+    message = str(info.value)
+    assert "whitespace" in message or "control character" in message
+    assert not any(bit in message.lower() for bit in ("s3cr3t", "ep-fake", "neon"))
+
+
+def test_surrounding_whitespace_is_stripped_like_the_loaders():
+    assert we.parse_url(f"  {FAKE}\n").dbname == "fakedb"
+
+
+def test_port_zero_is_refused():
+    with pytest.raises(we.ConfigError, match="between 1 and 65535"):
+        we.parse_url(f"postgresql://u:p@{FAKE_HOST}:0/db?sslmode=require")
+
+
+def test_explicit_default_port_is_kept():
+    assert we.parse_url(f"postgresql://u:p@{FAKE_HOST}:5432/db?sslmode=require").port == 5432
 
 
 def test_percent_encoded_user_and_dbname_are_decoded_and_both_forms_masked():
@@ -264,6 +316,30 @@ def test_main_config_error_writes_nothing_and_prints_no_value(tmp_path):
     assert "::add-mask::" not in stdout
     assert "::error" in stdout
     assert not any(bit in stdout for bit in ("s3cr3t", "S3cr3t"))
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "x%0A::warning::injected",  # decoded newline in the key
+        "x%0D%0A::add-mask::y",
+        "x%250A::warning::injected",  # decodes to a literal "%0A" the runner would unescape
+    ],
+)
+def test_main_error_message_is_escaped_into_one_command_line(tmp_path, key):
+    url = f"postgresql://u:p@{FAKE_HOST}/db?sslmode=require&{key}=v"
+    code, stdout, env_text = run_main(tmp_path, url)
+    assert code == 2 and env_text == ""
+    lines = stdout.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("::error title=Warehouse URL::")
+    assert "unsupported URL parameter" in lines[0]
+    # What the runner would show after unescaping %25/%0D/%0A: still the single message.
+    shown = lines[0].replace("%0A", "\n").replace("%0D", "\r").replace("%25", "%")
+    assert "\n" not in shown and "\r" not in shown
+
+
+def test_error_command_escapes_the_message():
+    assert we.error_command("a%0Ab\nc") == "::error title=Warehouse URL::a%250Ab%0Ac"
 
 
 def test_main_missing_url(tmp_path):

@@ -88,6 +88,37 @@ scripts/warehouse_report.py (new), tests/test_warehouse_env.py (new),
 tests/test_warehouse_report.py (new), docs/DATA_CONTRACT.md (§1, §2, §3), docs/DECISIONS.md
 (ADR-017), docs/PLAN.md, docs/PROGRESS.md
 
+Review round 1 (PR #13 approved with low findings; all fixed, not committed): L1
+`warehouse_env.py` now refuses, before `urlsplit`, whitespace or any control character (Unicode
+`Cc`, so C1 too) in the URL after the same `.strip()` as the loaders, and refuses a netloc with
+more than one `@` (Python splits user info at the last `@`, libpq at the first; it now splits at
+the only one). Messages name the problem only. Nit 1: port 0 refused; `5432 if port is None else
+port`. Nit 2: every `::error` in both scripts goes through `escape_command_data` (new
+`warehouse_env.error_command`, reused by `warehouse_report`); tests with a query key holding a
+decoded newline, CRLF and a literal `%0A`. L3: `plan` also loads `raw_enrichment` on a daily run
+when `public_holidays` has no `AR` row for the current UTC year (one `EXISTS` read, no API call;
+`utc_today()` / `decide(today=...)` injectable; test proves the plan works on a read-only
+session). L4: plan and the Olist/FX/holidays steps run when the ML load failed (`!cancelled()` and
+`steps.ml.outcome` is `success` or `failure`, so a failed setup step still stops everything) and
+depend only on the plan; `dbt build` runs only if ML and plan succeeded and Olist/FX/holidays are
+`success` or `skipped`; any failed step keeps the job red. L2: ADR-017 sentence on the archive
+sha256 (log + summary) vs the durable per-CSV `file_sha256`. Nit 4: DATA_CONTRACT §2 says a CSV
+hash change triggers the reload and a repack with identical CSVs does not. Nit 3 left as is
+(accepted). ADR-017 (modes, archive, URL split, failure handling, consequences) and DATA_CONTRACT
+§2/§3 updated. PLAN 2.6 stays `in review` until the first live `mode=full` run.
+Validation: `ruff check .` clean; full `pytest` with `requirements-dbt.txt` installed (dbt-core 1.12.6,
+dbt-postgres 1.11.0) against a real PostgreSQL 16 (initdb as non-root `claude` under /tmp, free port,
+deleted afterwards): 399 passed, 2 skipped (Olist real data); `tests/test_warehouse_env.py` 65
+(+20), `tests/test_warehouse_report.py` 26 (+5). actionlint 1.7.12 (release tarball, sha256
+verified against the release checksums file) clean on all workflows; shellcheck not available in
+this session, so the changed `run:` blocks were not re-shellchecked (only `if:` conditions and
+comments changed in the workflow, no shell).
+Gotcha: if the January holidays load fails (Nager.Date down), every daily run retries it and stays
+red until it succeeds; that is intended (loud), not a loop to silence.
+Files touched (round 1): .github/workflows/warehouse-load.yml, scripts/warehouse_env.py,
+scripts/warehouse_report.py, tests/test_warehouse_env.py, tests/test_warehouse_report.py,
+docs/DECISIONS.md (ADR-017), docs/DATA_CONTRACT.md (§2, §3), docs/PROGRESS.md
+
 ### 2026-11-04 — analytics-engineer — 2.0 (branch `warehouse/dbt-skeleton`)
 Done: dbt project in `warehouse/`: `dbt_project.yml` (`staging` views; `core`/`marts` blocks
 commented until their first model, otherwise dbt warns about unused paths), `profiles.yml` (env only:

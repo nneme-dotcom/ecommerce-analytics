@@ -281,8 +281,10 @@ private data repo `nneme-dotcom/ecommerce-analytics-data` at **`olist/archive.zi
 file, not Git LFS), next to `mercadolibre/`. It is never copied into this public repo. The warehouse
 workflow unpacks it with `--from-zip` into `$RUNNER_TEMP/olist` (the manifest above, with
 `archive_sha256`, is written there), logs its size and SHA-256 and shows `archive_sha256` in the
-job summary; the per-CSV SHA-256s land in `raw_olist._load_audit`. Replacing the archive (a new
-commit to that path) makes the next daily run reload `raw_olist`.
+job summary; the per-CSV SHA-256s land in `raw_olist._load_audit` (the durable record). The next
+daily run reloads `raw_olist` when the SHA-256 of any of the nine CSVs inside the archive differs
+from its latest `_load_audit.file_sha256`: a new commit to that path that changes a CSV triggers
+it, while repacking the archive with byte-identical CSVs (a different archive hash) does not.
 
 ### Schema `raw_olist` (task 1.4, `python -m ingestion.olist.load`)
 
@@ -451,10 +453,12 @@ exactly the six schemas of the table above plus PostgreSQL's own (`public` stays
 |--------|---------------------------|-----------|------------|
 | `raw_mercadolibre` | `python -m ingestion.mercadolibre.load --source <data repo>` | always (unchanged days skipped, ADR-015) | always |
 | `raw_olist` | `ingestion.olist.download --from-zip <data repo>/olist/archive.zip`, then `ingestion.olist.load` | only if a CSV in the archive differs from the last `_load_audit` hash, or never loaded | always |
-| `raw_enrichment` | `ingestion.enrichment.fx_rates`, `ingestion.enrichment.holidays` (defaults) | only if never loaded | always |
+| `raw_enrichment` | `ingestion.enrichment.fx_rates`, `ingestion.enrichment.holidays` (defaults) | only if never loaded, or `public_holidays` has no `AR` row for the current UTC year | always |
 | `staging`, `core`, `marts` | `dbt build --project-dir warehouse --profiles-dir warehouse` | after the loads | after the loads |
 
 Daily runs are chained after each successful *ML daily snapshot* run; `full` is a manual dispatch.
+The Olist and enrichment loads run even if the ML load failed; `dbt build` runs only if every load
+that was attempted succeeded, and any failed load fails the run (ADR-017).
 The job summary reports row counts per raw table, ML days loaded, dbt result counts and
 `pg_database_size` (counts only). Every raw schema can be dropped and rebuilt with one `full` run.
 

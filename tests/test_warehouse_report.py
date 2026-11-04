@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import zipfile
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,13 @@ from ingestion.olist.files import OLIST_FILES
 from scripts import warehouse_report as wr
 
 FIXTURES = Path(__file__).resolve().parents[1] / "warehouse" / "fixtures" / "raw_olist"
+# The fixtures hold AR holidays for 2026 only: "today" is pinned so the plan stays deterministic.
+TODAY = date(2026, 11, 4)
+
+
+@pytest.fixture(autouse=True)
+def _pin_today(monkeypatch):
+    monkeypatch.setattr(wr, "utc_today", lambda: TODAY)
 
 
 def make_zip(path: Path, *, change: str | None = None, drop: str | None = None) -> Path:
@@ -148,6 +156,21 @@ def test_render_summary_caps_listed_nodes():
     assert "(and 10 more)" in text
 
 
+def test_report_error_annotations_are_escaped():
+    _, notes = wr.render_summary(
+        mode="daily",
+        steps={},
+        rows=None,
+        days=None,
+        size=None,
+        dbt=None,
+        manifest=None,
+        db_error="Odd%0AError\n::warning::x",
+    )
+    (error,) = [n for n in notes if n.startswith("::error")]
+    assert "\n" not in error and "Odd%250AError%0A::warning::x" in error
+
+
 # --------------------------------------------------------------------------- DB: plan
 
 
@@ -212,6 +235,41 @@ def test_daily_with_only_fx_audited_loads_enrichment(db_conn, tmp_path):
     assert plan.enrichment is True
 
 
+def test_daily_in_a_new_year_without_its_ar_holidays_loads_enrichment(db_conn, tmp_path):
+    load_fixtures(db_conn)
+    zip_path = make_zip(tmp_path / "a.zip")
+    with db_conn.cursor() as cur:
+        same_year = wr.decide("daily", zip_path, cur, today=date(2026, 12, 31))
+        new_year = wr.decide("daily", zip_path, cur, today=date(2027, 1, 1))
+    assert (same_year.olist, same_year.enrichment) == (False, False)
+    assert (new_year.olist, new_year.enrichment) == (False, True)
+    assert any("no AR holidays for 2027" in r for r in new_year.reasons)
+
+
+def test_daily_with_only_br_holidays_for_the_year_still_loads_enrichment(db_conn, tmp_path):
+    # BR rows for the year do not count: the check is per country (AR = Mercado Libre).
+    load_fixtures(db_conn)
+    db_conn.execute("DELETE FROM raw_enrichment.public_holidays WHERE country_code = 'AR'")
+    db_conn.execute(
+        "INSERT INTO raw_enrichment.public_holidays (country_code, holiday_date, name, is_global,"
+        " holiday_types, source) VALUES ('BR', '2026-01-01', 'x', true, '{Public}', 'test')"
+    )
+    with db_conn.cursor() as cur:
+        plan = wr.decide("daily", make_zip(tmp_path / "a.zip"), cur, today=TODAY)
+    assert plan.enrichment is True
+
+
+def test_plan_reads_the_db_only(db_conn, tmp_path):
+    load_fixtures(db_conn)
+    db_conn.execute("SET default_transaction_read_only = on")
+    try:
+        with db_conn.cursor() as cur:
+            plan = wr.decide("daily", make_zip(tmp_path / "a.zip"), cur, today=date(2027, 1, 1))
+    finally:
+        db_conn.execute("SET default_transaction_read_only = off")
+    assert plan.enrichment is True
+
+
 def test_plan_cli_writes_only_booleans_to_github_output(
     db_conn, database_url, tmp_path, monkeypatch
 ):
@@ -225,6 +283,20 @@ def test_plan_cli_writes_only_booleans_to_github_output(
     )
     assert code == 0
     assert read_outputs(out) == {"olist": "false", "enrichment": "false"}
+
+
+def test_plan_cli_new_year_requests_enrichment(db_conn, database_url, tmp_path, monkeypatch):
+    load_fixtures(db_conn)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setattr(wr, "utc_today", lambda: date(2027, 1, 2))
+    out = tmp_path / "out"
+    out.write_text("")
+    code = wr.main(
+        ["plan", "--mode", "daily", "--olist-zip", str(make_zip(tmp_path / "a.zip"))],
+        {"GITHUB_OUTPUT": str(out)},
+    )
+    assert code == 0
+    assert read_outputs(out) == {"olist": "false", "enrichment": "true"}
 
 
 def test_plan_cli_db_error_is_type_only(tmp_path, monkeypatch, capsys):

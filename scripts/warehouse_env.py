@@ -19,6 +19,10 @@ workflow exports ``PGCHANNELBINDING="$DBT_PG_CHANNEL_BINDING"`` in the dbt step 
 The value is always one of libpq's three keywords: ``prefer`` (libpq's default) when the URL has
 none, because an *empty* ``PGCHANNELBINDING`` is an invalid value for libpq.
 
+Refused before parsing: whitespace or control characters anywhere in the URL, and more than one
+``@`` before the host (Python and libpq split user info at different ``@``). Every ``::error``
+message goes through ``escape_command_data``.
+
 Exit codes: 0 ok, 2 configuration error (variable missing, URL malformed or not allowed).
 """
 
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -101,6 +106,23 @@ class WarehouseParts:
         }
 
 
+def _is_control(ch: str) -> bool:
+    # C0, DEL and C1 (Unicode category Cc).
+    return unicodedata.category(ch) == "Cc"
+
+
+def _check_raw_url(url: str) -> None:
+    """Refuse whitespace or control characters anywhere in the (stripped) URL, before parsing.
+
+    ``urlsplit`` silently drops tab/CR/LF (WHATWG "unsafe bytes"), so the parts it returns could
+    differ from what libpq sees in the same string, and a fragment could escape masking.
+    """
+    if any(_is_control(ch) for ch in url):
+        raise ConfigError("the URL contains a control character")
+    if any(ch.isspace() for ch in url):
+        raise ConfigError("the URL contains whitespace (percent-encode it, e.g. %20)")
+
+
 def _check_printable(name: str, value: str) -> None:
     # A control character (e.g. a %0A in the password) would break both ::add-mask:: (one line per
     # command) and $GITHUB_ENV, so refuse it rather than risk an unmasked fragment.
@@ -110,14 +132,19 @@ def _check_printable(name: str, value: str) -> None:
 
 def parse_url(url: str) -> WarehouseParts:
     """Parse a PostgreSQL URL. Raises ``ConfigError`` with a message that contains no value."""
+    # Surrounding whitespace is stripped exactly as the loaders do (ingestion.db), so both read
+    # the same string; anything left that is whitespace or a control character is refused.
     url = url.strip()
     if not url:
         raise ConfigError(f"{URL_ENV} is not set")
+    _check_raw_url(url)
     try:
         parts = urlsplit(url)
         port = parts.port  # raises ValueError if not a number / out of range
     except ValueError as exc:
         raise ConfigError("the URL is malformed (bad port or brackets)") from exc
+    if port == 0:
+        raise ConfigError("the URL port must be between 1 and 65535")
     if parts.scheme not in SCHEMES:
         raise ConfigError("the URL scheme must be postgresql:// or postgres://")
     if parts.fragment:
@@ -125,7 +152,14 @@ def parse_url(url: str) -> WarehouseParts:
     netloc = parts.netloc
     if "@" not in netloc:
         raise ConfigError("the URL has no user/password (expected user:password@host)")
-    userinfo, hostport = netloc.rsplit("@", 1)
+    if netloc.count("@") > 1:
+        # Python splits the user info at the last '@', libpq at the first: the two would disagree
+        # on user/password/host, and a fragment of the password could end up unmasked.
+        raise ConfigError(
+            "the URL has more than one '@' before the host (percent-encode '@' in the user or "
+            "password as %40)"
+        )
+    userinfo, hostport = netloc.split("@", 1)
     if "," in hostport:
         raise ConfigError("multi-host URLs are not supported")
     if ":" not in userinfo:
@@ -174,7 +208,7 @@ def parse_url(url: str) -> WarehouseParts:
         password=password,
         password_encoded=password_enc,
         host=host,
-        port=port or 5432,
+        port=5432 if port is None else port,
         dbname=dbname,
         sslmode=sslmode,
         channel_binding=channel_binding,
@@ -185,6 +219,11 @@ def parse_url(url: str) -> WarehouseParts:
 def escape_command_data(value: str) -> str:
     """Escape a value for a workflow command, as the runner unescapes ``%25``, ``%0D``, ``%0A``."""
     return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def error_command(message: str, title: str = "Warehouse URL") -> str:
+    """An ``::error`` line whose message is escaped, so it can never start a second command."""
+    return f"::error title={title}::{escape_command_data(message)}"
 
 
 def mask_commands(parts: WarehouseParts) -> list[str]:
@@ -222,13 +261,11 @@ def main(environ: dict[str, str] | None = None, out=None) -> int:
     try:
         parts = parse_url(environ.get(URL_ENV, ""))
     except ConfigError as exc:
-        print(f"::error title=Warehouse URL::{URL_ENV}: {exc}", file=out)
+        print(error_command(f"{URL_ENV}: {exc}"), file=out)
         return EXIT_CONFIG
     env_path = environ.get("GITHUB_ENV", "")
     if not env_path:
-        print(
-            "::error title=Warehouse URL::GITHUB_ENV is not set (run in GitHub Actions)", file=out
-        )
+        print(error_command("GITHUB_ENV is not set (run in GitHub Actions)"), file=out)
         return EXIT_CONFIG
     # Masks first, flushed, before any value is written anywhere.
     for line in mask_commands(parts):

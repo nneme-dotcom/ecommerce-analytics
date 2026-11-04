@@ -10,7 +10,7 @@ name: Warehouse load
 # Modes:
 # - daily: raw_mercadolibre (unchanged days are skipped by hash, ADR-015); raw_olist only if the
 #   archive's CSVs differ from the last load (or it was never loaded); raw_enrichment only if it was
-#   never loaded. Then dbt build.
+#   never loaded or has no AR holidays for the current UTC year. Then dbt build.
 # - full: all three raw schemas (Olist from olist/archive.zip in the data repo, both enrichment
 #   loaders against the public APIs), then dbt build.
 #
@@ -19,6 +19,10 @@ name: Warehouse load
 # $GITHUB_ENV (never job outputs, never shell parsing, no `set -x`). DATA_REPO_PAT (repo-level,
 # ADR-010/ADR-014) reads the private data repo; it reaches git only as an env-only http.extraheader
 # in the fetch step (never in a URL, argv or .git/config), as in ADR-009.
+#
+# Failure handling (ADR-017): the plan and the Olist/enrichment loads run even if the ML load
+# failed (each load is its own transaction, so a bad ML day cannot block a `full` Olist rebuild).
+# dbt build runs only if every load that was attempted succeeded. Any failed step leaves the job red.
 
 on:
   workflow_run:
@@ -131,8 +135,11 @@ jobs:
           DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
         run: python -m ingestion.mercadolibre.load --source data
 
+      # Runs whether the ML load succeeded or failed (not when an earlier setup step failed, which
+      # leaves steps.ml skipped).
       - name: Decide the Olist and enrichment loads
         id: plan
+        if: ${{ !cancelled() && (steps.ml.outcome == 'success' || steps.ml.outcome == 'failure') }}
         timeout-minutes: 5
         env:
           DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
@@ -140,7 +147,7 @@ jobs:
 
       - name: Load raw_olist (from olist/archive.zip)
         id: olist
-        if: steps.plan.outputs.olist == 'true'
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.olist == 'true' }}
         timeout-minutes: 20
         env:
           DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
@@ -161,7 +168,7 @@ jobs:
 
       - name: Load raw_enrichment.fx_rates (Frankfurter v1)
         id: fx
-        if: steps.plan.outputs.enrichment == 'true'
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.enrichment == 'true' }}
         timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
@@ -169,16 +176,24 @@ jobs:
 
       - name: Load raw_enrichment.public_holidays (Nager.Date v3)
         id: holidays
-        if: steps.plan.outputs.enrichment == 'true'
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.enrichment == 'true' }}
         timeout-minutes: 5
         env:
           DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
         run: python -m ingestion.enrichment.holidays
 
+      # Only if every attempted load succeeded: ML and the plan must succeed; Olist/FX/holidays
+      # either succeeded or were not needed (skipped). A failed or timed-out load means no dbt.
       # dbt-postgres has no channel_binding profile field; libpq (bundled with psycopg2) reads
       # PGCHANNELBINDING. Set here only, always to a valid keyword (ADR-017).
       - name: dbt build
         id: dbt
+        if: >-
+          ${{ !cancelled() &&
+              steps.ml.outcome == 'success' && steps.plan.outcome == 'success' &&
+              (steps.olist.outcome == 'success' || steps.olist.outcome == 'skipped') &&
+              (steps.fx.outcome == 'success' || steps.fx.outcome == 'skipped') &&
+              (steps.holidays.outcome == 'success' || steps.holidays.outcome == 'skipped') }}
         timeout-minutes: 20
         run: |
           export PGCHANNELBINDING="$DBT_PG_CHANNEL_BINDING"
