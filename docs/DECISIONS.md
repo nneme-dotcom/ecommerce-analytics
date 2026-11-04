@@ -241,3 +241,34 @@ alongside Phase 2.
 workflow summary keep this visible. 100 CU-hours a month cannot keep a compute awake all month, so the
 API must tolerate cold starts and must not keep Neon awake. If limits are hit, the dbt project runs
 unchanged on any PostgreSQL; Phase 4 (AWS) may move the warehouse without changing the layout.
+
+## ADR-015 — ML raw load: one transaction per run, unchanged days skipped by file hash (2026-11-04)
+
+**Context.** Task 2.5 loads every `snapshot_date=` folder of the data repo into `raw_mercadolibre`
+(DATA_CONTRACT §1b), and 2.6 will run it daily against Neon (ADR-014: 1 GB storage, 100 CU-hours a
+month). History grows by ≈ 2.3 k offers a day. Rewriting every day on every run (delete + insert)
+would produce a growing amount of WAL and dead tuples each day (until autovacuum catches up, a full
+rewrite roughly doubles the table on disk), for data that has not changed. Only a re-run day
+(ADR-007) changes after it is first written.
+
+**Decision.**
+- Every folder is **validated** on every run (no database access), and the load is **one
+  transaction** for the whole run, so a bad folder or a failure leaves the schema as it was.
+- `runs.file_sha256` records the SHA-256 of the five files as loaded. A day whose hashes are equal
+  is **skipped** (no delete, no insert, no audit row). A day that changed is deleted and re-inserted
+  for that `snapshot_date` only. `--full-reload` forces every day; a data table that was just
+  created or re-created (schema drift) forces a full reload too, because it is empty.
+- Days in the database with no folder under `--source` ("orphans", read from all five data
+  tables before any drop) are kept (warning): the loader never deletes a date it was not given.
+  Therefore, if a data table must be created or re-created while orphans exist, the run **fails**
+  (exit 1, nothing changed) instead of silently losing the orphans' rows in that table (or leaving
+  them without a `runs` row); the fix is to load from the full data repo checkout.
+- Typed columns are lenient (wrong JSON type → NULL) while identity fields (`snapshot_date`,
+  `run_id`, `captured_at`, per-table keys) are strict; `payload jsonb` holds the full line parsed
+  as jsonb (sent as text to `COPY`, so numbers keep their exact value; whitespace, key order and
+  duplicate keys are not kept).
+- Nothing new is added: psycopg 3 + `COPY` (ADR-011), stdlib `gzip`/`json`/`hashlib`.
+
+**Consequences.** A daily run normally writes one day. Rows changed by hand in the database are not
+detected by the hash (the raw schema belongs to the loader; use `--full-reload`). Validation reads
+all folders each run (CPU on the runner, not on Neon; ≈ 0.85 M lines a year).
