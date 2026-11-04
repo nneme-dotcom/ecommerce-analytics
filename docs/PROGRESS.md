@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.6 Neon load workflow (owner prerequisites done 2026-11-04: Neon project in EU Frankfurt (PostgreSQL version not yet confirmed), Environment `warehouse` with `WAREHOUSE_DATABASE_URL`, `olist/archive.zip` in the data repo), then 2.1. Follow-ups 1.6–1.10 alongside. Keep watching the daily ML runs for 1.3.
+- **Next up:** 2.6 Neon load workflow (owner prerequisites done 2026-11-04: Neon project in EU Frankfurt (PostgreSQL version not yet confirmed), Environment `warehouse` with `WAREHOUSE_DATABASE_URL`, `olist/archive.zip` in the data repo), then 2.1. Follow-ups 1.6–1.11 alongside. Keep watching the daily ML runs for 1.3.
 - **Blockers:** none.
 
 ## Handoff template
@@ -88,6 +88,7 @@ warehouse/macros/assert_node_schemas.sql (new), warehouse/dbt_project.yml,
 warehouse/tests/assert_sources_match_contract.sql, warehouse/README.md, warehouse/fixtures/README.md,
 tests/warehouse/ (new), .github/workflows/ci.yml, docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md
 (ADR-016), docs/PROGRESS.md
+
 ### 2026-11-04 — data-engineer — 2.5 (PR #11, branch `ingestion/ml-raw-load`, after review round 1)
 Done: DATA_CONTRACT **§1b `raw_mercadolibre`** (contract first): `runs`, `highlights`, `products`,
 `offers`, `trends` (typed columns = exactly the §1 fields + `line_no` + full-line `payload jsonb`)
