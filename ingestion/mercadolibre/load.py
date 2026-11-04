@@ -11,10 +11,15 @@ Rules (DATA_CONTRACT §1b, ADR-015):
   the five tables, ``COPY`` the files, check the loaded counts, append ``_load_audit`` rows.
 - A day whose file SHA-256s equal the ones recorded in ``runs.file_sha256`` is unchanged and
   skipped, unless ``--full-reload`` is given or a data table was just (re-)created.
-- Typed columns are lenient (wrong JSON type -> NULL); ``payload`` keeps the full line.
+- Days in the database with no folder under ``--source`` ("orphans", read from all five data
+  tables) are kept; but if a data table must be (re-)created while orphans exist, the run fails
+  (their rows would be lost): load from the full data repo checkout.
+- Typed columns are lenient (wrong JSON type -> NULL); ``payload`` holds the full line, parsed as
+  jsonb (values exact; whitespace, key order and duplicate keys are not kept).
 
 Error messages name files and line numbers, never line contents (the Actions logs are public, and
 raw ML data stays private: ADR-003). ``DATABASE_URL`` is never logged.
+Unexpected exceptions are logged by type only (their message could quote row data).
 Exit codes: 0 ok · 1 validation or load failed (nothing changed) · 2 configuration error.
 """
 
@@ -50,7 +55,10 @@ from ingestion.mercadolibre.raw_schema import (
     SCHEMA,
     Column,
     SchemaDriftError,
-    ensure_schema,
+    existing_columns,
+    prepare_schema,
+    recreate_data_tables,
+    stale_data_tables,
 )
 
 EXIT_OK, EXIT_FAILED, EXIT_CONFIG = 0, 1, 2
@@ -60,10 +68,14 @@ DAY_PREFIX = "snapshot_date="
 RUN_FILE = "run.json"
 STATUSES = ("success", "partial", "failed")
 INT_RANGES = {"integer": (-(2**31), 2**31 - 1), "bigint": (-(2**63), 2**63 - 1)}
-# psycopg COPY type names; payload is sent as text and parsed by the server into jsonb, so the
-# stored document is the line exactly as written (numbers keep their precision).
+# psycopg COPY type names; payload is sent as text and parsed by the server into jsonb, so numbers
+# keep their exact value (jsonb itself drops whitespace, key order and duplicate keys).
 COPY_TYPES = {"timestamp with time zone": "timestamptz", "jsonb": "text"}
 DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Lone UTF-16 surrogates: json.loads accepts a "\udc80" escape, but such a str cannot be encoded
+# as UTF-8 (COPY of a typed column fails) and jsonb refuses it.
+SURROGATE_RE = re.compile("[\ud800-\udfff]")
+MAX_ORPHANS_LISTED = 10
 
 logger = logging.getLogger(__name__)
 
@@ -137,26 +149,38 @@ def _reject_constant(name: str) -> Any:
     raise ValueError(f"{name} is not valid JSON")
 
 
-def _has_nul(value: Any) -> bool:
-    if isinstance(value, str):
-        return "\x00" in value
-    if isinstance(value, dict):
-        return any(_has_nul(k) or _has_nul(v) for k, v in value.items())
-    if isinstance(value, list):
-        return any(_has_nul(v) for v in value)
-    return False
+def unstorable_char(value: Any) -> str | None:
+    """Name of the first character in any key or string of ``value`` that PostgreSQL cannot store
+    (NUL, lone surrogate), or None. Iterative: nesting depth is only bounded by ``json.loads``."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if "\x00" in item:
+                return "a NUL character"
+            if SURROGATE_RE.search(item):
+                return "a lone UTF-16 surrogate"
+        elif isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
 
 
 def parse_json(text: str, where: str, *, exact: bool) -> Any:
-    """Strict JSON: no NaN/Infinity, no NUL characters (jsonb refuses them)."""
+    """Strict JSON: no NaN/Infinity, no NUL characters or lone surrogates (jsonb refuses them)."""
     try:
         obj = json.loads(
             text, parse_float=Decimal if exact else float, parse_constant=_reject_constant
         )
-    except ValueError:
+    except (ValueError, RecursionError):
         raise LoadError(f"{where}: blank line or not valid JSON") from None
-    if "\\u0000" in text and _has_nul(obj):
-        raise LoadError(f"{where}: contains a NUL character (not storable in jsonb)")
+    # ``text`` is decoded strict UTF-8, so both can only come from a \u escape.
+    if "\\u" in text:
+        bad = unstorable_char(obj)
+        if bad:
+            raise LoadError(f"{where}: contains {bad} (not storable in PostgreSQL)")
     return obj
 
 
@@ -188,6 +212,8 @@ def iter_rows(
 ) -> Iterator[tuple[Any, ...]]:
     """Yield the COPY tuples of one ``.jsonl.gz`` file; raise :class:`LoadError` on any problem."""
     name = file_name(kind)
+    if not data:
+        raise LoadError(f"{folder}/{name}: not a valid gzip file (empty file)")
     try:
         text = gzip.decompress(data)
     except (OSError, EOFError, zlib.error) as exc:
@@ -417,13 +443,59 @@ def _load_day(cur, day: DayFolder, load_id: uuid.UUID, summary: LoadSummary) -> 
         summary.rows[kind] += loaded
 
 
+def _stored_dates(cur) -> set[date]:
+    """Every ``snapshot_date`` held by any of the five data tables (drifted ones included)."""
+    from psycopg import sql
+
+    dates: set[date] = set()
+    for table in DATA_TABLES:
+        columns = dict(existing_columns(cur, table))
+        if not columns:
+            continue
+        ident = sql.Identifier(SCHEMA, table)
+        if columns.get("snapshot_date") == "date":
+            cur.execute(sql.SQL("SELECT DISTINCT snapshot_date FROM {}").format(ident))
+            dates.update(d for (d,) in cur.fetchall() if d is not None)
+            continue
+        cur.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(ident))
+        if cur.fetchone()[0]:
+            raise LoadError(
+                f"{SCHEMA}.{table} has rows but no snapshot_date date column, so the days it holds"
+                " are unknown: check it and drop it by hand"
+            )
+    return dates
+
+
+def _list_dates(dates: list[date]) -> str:
+    listed = ", ".join(d.isoformat() for d in dates[:MAX_ORPHANS_LISTED])
+    return listed + (", ..." if len(dates) > MAX_ORPHANS_LISTED else "")
+
+
 def load(conn, days: list[DayFolder], *, full_reload: bool = False) -> LoadSummary:
     """Load the validated days in one transaction; skip unchanged ones unless ``full_reload``."""
     from psycopg import sql
 
     summary = LoadSummary(load_id=uuid.uuid4())
     with conn.transaction(), conn.cursor() as cur:
-        fresh = ensure_schema(cur)
+        prepare_schema(cur)
+        stale = stale_data_tables(cur)
+        # Orphans are read from all five tables before anything is dropped: a drifted ``runs``
+        # alone must not hide days that the file tables still hold, and vice versa.
+        orphans = sorted(_stored_dates(cur) - {d.snapshot_date for d in days})
+        if orphans and stale:
+            raise LoadError(
+                f"table(s) {', '.join(sorted(stale))} must be (re-)created to match DATA_CONTRACT"
+                f" §1b, but {len(orphans)} stored day(s) have no folder under --source"
+                f" ({_list_dates(orphans)}) and would lose rows: run with --source set to the"
+                " full data repo checkout"
+            )
+        if orphans:
+            logger.warning(
+                "%d loaded day(s) have no folder under --source and are kept: %s",
+                len(orphans),
+                _list_dates(orphans),
+            )
+        fresh = recreate_data_tables(cur, stale)
         if fresh and not full_reload:
             logger.info("tables created or re-created (%s): loading every day", sorted(fresh))
         reload_all = full_reload or bool(fresh)
@@ -433,13 +505,6 @@ def load(conn, days: list[DayFolder], *, full_reload: bool = False) -> LoadSumma
             )
         )
         loaded_sha = dict(cur.fetchall())
-        orphans = sorted(set(loaded_sha) - {d.snapshot_date for d in days})
-        if orphans:
-            logger.warning(
-                "%d loaded day(s) have no folder under --source and are kept: %s",
-                len(orphans),
-                ", ".join(d.isoformat() for d in orphans),
-            )
         for day in days:
             if not reload_all and loaded_sha.get(day.snapshot_date) == day.sha256:
                 summary.unchanged.append(day.snapshot_date)
@@ -501,12 +566,15 @@ def main(argv: list[str] | None = None) -> int:
     except LoadError as exc:
         logger.error("validation failed, nothing loaded: %s", exc)
         return EXIT_FAILED
+    except Exception as exc:  # noqa: BLE001 - the message could quote row data: type only
+        logger.error("validation failed, nothing loaded: unexpected %s", type(exc).__name__)
+        return EXIT_FAILED
 
     import psycopg
 
     try:
         conn = connect(url)
-    except psycopg.Error as exc:
+    except Exception as exc:  # noqa: BLE001
         # The message of a malformed connection string may echo part of it: don't print it.
         logger.error(
             "could not connect to the database (%s); check DATABASE_URL", type(exc).__name__
@@ -520,6 +588,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_FAILED
     except psycopg.Error as exc:
         logger.error("load rolled back, nothing changed: %s", describe_db_error(exc))
+        return EXIT_FAILED
+    except Exception as exc:  # noqa: BLE001 - the message could quote row data: type only
+        logger.error("load rolled back, nothing changed: unexpected %s", type(exc).__name__)
         return EXIT_FAILED
     logger.info(
         "load %s committed: %d day(s) loaded, %d unchanged; rows %s",

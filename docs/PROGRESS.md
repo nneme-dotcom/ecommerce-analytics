@@ -20,7 +20,7 @@ Files touched:
 
 ## Log
 
-### 2026-11-04 — data-engineer — 2.5 (branch `ingestion/ml-raw-load`, uncommitted for the orchestrator)
+### 2026-11-04 — data-engineer — 2.5 (PR #11, branch `ingestion/ml-raw-load`, after review round 1)
 Done: DATA_CONTRACT **§1b `raw_mercadolibre`** (contract first): `runs`, `highlights`, `products`,
 `offers`, `trends` (typed columns = exactly the §1 fields + `line_no` + full-line `payload jsonb`)
 and an append-only `_load_audit` (one row per table per day loaded). `python -m
@@ -57,6 +57,21 @@ changed; `raw_schema.py` already checks `_load_audit` first (the 1.8 finding).
 Files touched: ingestion/mercadolibre/load.py, ingestion/mercadolibre/raw_schema.py (new),
 tests/mercadolibre/test_ml_raw_load.py (new), docs/DATA_CONTRACT.md (§1b), docs/DECISIONS.md
 (ADR-015), docs/PLAN.md, docs/PROGRESS.md
+Review round 1 (fixes uncommitted, for the orchestrator): (1, blocking) orphan days are now read
+from the union of all five data tables **before** any drop (`raw_schema` split into
+`prepare_schema` / `stale_data_tables` / `recreate_data_tables`); a (re-)create while orphans exist
+raises `LoadError` (rolled back, exit 1, message says to use the full data repo checkout); a drifted
+table with rows but no `snapshot_date date` column also fails. (2) `parse_json` catches
+`RecursionError`; NUL and lone-surrogate check (iterative, keys and values) in validation; `main`
+has a final `except Exception` (type only + "load rolled back"), also around validation and
+connect. (3) zero-byte `.jsonl.gz` rejected as invalid gzip. (4) tests: 30-digit exact decimal vs
+`payload->>'price'`, COPY-escaping round-trip (tab, newline, CR, backslash, literal `\N`, quotes,
+non-ASCII, raw tab whitespace, surrogate pair) in a typed column and the payload, both review
+reproductions + dropped table, orphans from file tables only, real 22P02 through `main` with no row
+content in `caplog`, unexpected exceptions in both phases. 13 of the new tests fail on the round-0
+code. (5) §1b payload wording and the orphans-plus-drift rule in §1b and ADR-015 (edited in place).
+PLAN 1.9 added (reviewer side note: lone surrogates in the snapshot writer). `ruff check .` clean;
+full `pytest` 271 passed, 2 skipped (Olist real data), PostgreSQL 16.
 
 ### 2026-11-04 — orchestrator — Phase 1 review, Phase 2 plan
 Done: owner approved Phase 1 (1.3 stays open until 3 consecutive scheduled successes; 1.6/1.8

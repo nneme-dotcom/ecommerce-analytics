@@ -139,9 +139,9 @@ stays the system of record (ADR-003, ADR-014): the schema can be dropped and reb
 time. One table per snapshot file, plus `runs` (from `run.json`) and `_load_audit`.
 
 Typed columns are exactly the §1 fields; no field is added or derived. **`payload` (jsonb) holds the
-full line as written** (the run.json object, for `runs`), so nothing is lost if a typed column is
-null. Loader-added columns: `line_no` (1-based line in the `.jsonl.gz`), and `load_id`/`file_sha256`
-in `runs`.
+full line, parsed as jsonb (values exact; whitespace, key order and duplicate keys are not kept)**
+(the run.json object, for `runs`), so no value is lost if a typed column is null. Loader-added
+columns: `line_no` (1-based line in the `.jsonl.gz`), and `load_id`/`file_sha256` in `runs`.
 
 ### Load rules
 - **Every** `mercadolibre/snapshot_date=YYYY-MM-DD/` folder under `--source` is validated before the
@@ -151,10 +151,11 @@ in `runs`.
 - **Validation** (any failure = exit 1, nothing changed): `run.json` present, a JSON object with
   `run_id` (uuid), `snapshot_date` (= folder date), `status` (`success`·`partial`·`failed`) and
   `row_counts` (the four files, non-negative ints); all four `.jsonl.gz` files present and valid gzip;
-  every line UTF-8 JSON object (no blank lines; NaN/Infinity refused) with `snapshot_date` = folder
-  date, `run_id` = run.json `run_id`, `captured_at` an ISO-8601 timestamp with offset, and the
-  required fields below; line count = `row_counts[<file>]`. Error messages name the file and line,
-  **never the line content** (Actions logs of this repo are public).
+  every line UTF-8 JSON object (no blank lines; NaN/Infinity, NUL characters and lone UTF-16
+  surrogates such as a `\udc80` escape refused, in any key or value; a zero-byte file is not valid
+  gzip) with `snapshot_date` = folder date, `run_id` = run.json `run_id`, `captured_at` an ISO-8601
+  timestamp with offset, and the required fields below; line count = `row_counts[<file>]`. Error
+  messages name the file and line, **never the line content** (Actions logs of this repo are public).
 - **Typed columns are lenient:** a value that is absent or of the wrong JSON type (e.g. a string
   `price`, a bool where an int is expected, an int outside the column range) is loaded as NULL; the
   original stays in `payload`. Numbers are parsed as exact decimals (no float rounding).
@@ -165,14 +166,21 @@ in `runs`.
   of the loaded copy is not rewritten (no delete, no insert, no audit row). `--full-reload` reloads
   every day; a data table that was just created or re-created forces a full reload too. A re-run day
   (new files in the data repo) is therefore replaced on the next load.
-- Dates present in the database but with no folder under `--source` are kept (warning logged).
+- **Orphan days** (dates present in any of the five data tables but with no folder under
+  `--source`) are kept (warning logged). They are read from all five tables before anything is
+  dropped. **Orphans + drift = failure:** if a data table must be created or re-created (drift below,
+  or dropped by hand) while orphans exist, the run fails (exit 1, nothing changed) because their
+  rows in that table would be lost; run again with `--source` set to the full data repo checkout. A
+  drifted table that holds rows but has no `snapshot_date date` column also fails the run (its days
+  are unknown): drop it by hand.
 - **Schema drift** (columns' names, order or types differ from this section): every data table here
   (`runs`, `highlights`, `products`, `offers`, `trends`) is owned by this loader and is dropped and
   re-created inside the load transaction (no `CASCADE`: a dependent view makes the load fail).
   `_load_audit` is checked **first** and **never dropped**: if it drifts the load fails (exit 1) with
   nothing changed; migrate it by hand. Constraints (PK, NOT NULL) are not part of the drift check.
 - Exit codes: 0 ok (incl. nothing to reload) · 1 validation or load failed (nothing changed) · 2
-  configuration error (`DATABASE_URL` missing). `DATABASE_URL` is never logged.
+  configuration error (`DATABASE_URL` missing). `DATABASE_URL` is never logged; database data errors
+  and unexpected exceptions are logged by class/SQLSTATE only, never with their message.
 
 ### Common columns (the four file tables, in this order)
 | column | type | notes |
@@ -182,7 +190,7 @@ in `runs`.
 | line_no | integer | 1-based line in the file; PK (`snapshot_date`, `line_no`) |
 | captured_at | timestamptz | required |
 | *typed fields* | | per table below |
-| payload | jsonb | the full line |
+| payload | jsonb | the full line, parsed as jsonb |
 
 ### `raw_mercadolibre.highlights`
 `category_id` text (required) · `position` integer? · `product_id` text (required) · `type` text?

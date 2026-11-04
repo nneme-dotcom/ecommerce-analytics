@@ -5,6 +5,10 @@ its columns (names, order or types) differ from the definitions below, it is dro
 inside the load transaction (no ``CASCADE``: a dependent view makes the load fail instead of
 vanishing). ``_load_audit`` is append-only and never dropped: it is checked **before** any other
 table is touched, and drift raises :class:`SchemaDriftError` (the transaction rolls back).
+
+Three steps, so that the loader can read the stored dates before anything is dropped:
+:func:`prepare_schema` (lock, schema, ``_load_audit``), :func:`stale_data_tables` (read-only) and
+:func:`recreate_data_tables`.
 """
 
 from __future__ import annotations
@@ -150,7 +154,8 @@ class SchemaDriftError(Exception):
     """``_load_audit`` has columns that differ from the contract (it is never re-created)."""
 
 
-def _existing_columns(cur, table: str) -> list[tuple[str, str]]:
+def existing_columns(cur, table: str) -> list[tuple[str, str]]:
+    """``(name, format_type)`` of the columns of ``raw_mercadolibre.<table>`` ([] if missing)."""
     cur.execute(
         "SELECT a.attname, format_type(a.atttypid, a.atttypmod)"
         " FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid"
@@ -182,12 +187,10 @@ def _create_table(cur, table: Table) -> None:
     )
 
 
-def ensure_schema(cur) -> set[str]:
-    """Prepare ``raw_mercadolibre`` inside the load transaction.
+def prepare_schema(cur) -> None:
+    """Lock, create the schema and check/create ``_load_audit`` (first, before any other table).
 
-    Returns the data tables that were created or re-created (they are empty now, so the caller
-    must reload every day). Raises :class:`SchemaDriftError` if ``_load_audit`` drifted, before
-    any other table is touched.
+    Raises :class:`SchemaDriftError` if ``_load_audit`` drifted.
     """
     from psycopg import sql
 
@@ -196,7 +199,7 @@ def ensure_schema(cur) -> set[str]:
     cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(SCHEMA)))
 
     audit = TABLES[AUDIT_TABLE]
-    existing = _existing_columns(cur, AUDIT_TABLE)
+    existing = existing_columns(cur, AUDIT_TABLE)
     if not existing:
         _create_table(cur, audit)
     elif existing != audit.expected():
@@ -205,15 +208,27 @@ def ensure_schema(cur) -> set[str]:
             " and never re-created: migrate it by hand"
         )
 
-    fresh: set[str] = set()
+
+def stale_data_tables(cur) -> dict[str, bool]:
+    """Data tables whose columns differ from the contract -> ``True`` if the table exists (drift,
+    to be dropped) or ``False`` if it is missing (to be created). Read-only."""
+    stale: dict[str, bool] = {}
     for name in DATA_TABLES:
-        table = TABLES[name]
-        existing = _existing_columns(cur, name)
-        if existing == table.expected():
+        existing = existing_columns(cur, name)
+        if existing != TABLES[name].expected():
+            stale[name] = bool(existing)
+    return stale
+
+
+def recreate_data_tables(cur, stale: dict[str, bool]) -> set[str]:
+    """Drop (no ``CASCADE``) and create the tables returned by :func:`stale_data_tables`."""
+    from psycopg import sql
+
+    for name in DATA_TABLES:
+        if name not in stale:
             continue
-        if existing:
+        if stale[name]:
             logger.info("re-creating %s.%s (columns changed)", SCHEMA, name)
             cur.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(SCHEMA, name)))
-        _create_table(cur, table)
-        fresh.add(name)
-    return fresh
+        _create_table(cur, TABLES[name])
+    return set(stale)

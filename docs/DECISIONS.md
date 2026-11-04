@@ -258,11 +258,15 @@ rewrite roughly doubles the table on disk), for data that has not changed. Only 
   is **skipped** (no delete, no insert, no audit row). A day that changed is deleted and re-inserted
   for that `snapshot_date` only. `--full-reload` forces every day; a data table that was just
   created or re-created (schema drift) forces a full reload too, because it is empty.
-- Days in the database with no folder under `--source` are kept (warning): the loader never
-  deletes a date it was not given.
+- Days in the database with no folder under `--source` ("orphans", read from all five data
+  tables before any drop) are kept (warning): the loader never deletes a date it was not given.
+  Therefore, if a data table must be created or re-created while orphans exist, the run **fails**
+  (exit 1, nothing changed) instead of silently losing the orphans' rows in that table (or leaving
+  them without a `runs` row); the fix is to load from the full data repo checkout.
 - Typed columns are lenient (wrong JSON type → NULL) while identity fields (`snapshot_date`,
-  `run_id`, `captured_at`, per-table keys) are strict; `payload jsonb` keeps the line as written
-  (sent as text to `COPY`, so numbers keep their exact value).
+  `run_id`, `captured_at`, per-table keys) are strict; `payload jsonb` holds the full line parsed
+  as jsonb (sent as text to `COPY`, so numbers keep their exact value; whitespace, key order and
+  duplicate keys are not kept).
 - Nothing new is added: psycopg 3 + `COPY` (ADR-011), stdlib `gzip`/`json`/`hashlib`.
 
 **Consequences.** A daily run normally writes one day. Rows changed by hand in the database are not
