@@ -208,6 +208,87 @@ Latest load per table: `SELECT DISTINCT ON (table_name) * FROM raw_olist._load_a
 
 ---
 
+## 2b. Enrichment raw — `draft`
+
+Schema `raw_enrichment`, written by task 1.5. Both sources are public and unauthenticated. Unlike
+`raw_olist`, values arrive as JSON and are stored **typed** (dates, numerics, booleans, arrays).
+Source shapes are documented assumptions (ADR-012): neither API is reachable from the agents'
+workspace; the first live run is the manual workflow `enrichment-load.yml`.
+
+### `raw_enrichment.fx_rates` (`python -m ingestion.enrichment.fx_rates`)
+
+ECB euro foreign exchange reference rates, one row per ECB publication day and currency
+(no rows on weekends or TARGET holidays: carry-forward is a `staging` decision).
+Source: Frankfurter **v1** (`https://api.frankfurter.dev/v1/<start>..<end>?from=EUR&to=BRL,USD`),
+which serves ECB data only.
+
+| column | type | notes |
+|--------|------|-------|
+| rate_date | date | ECB reference date |
+| base_currency | char(3) | always `EUR` |
+| quote_currency | char(3) | `BRL`, `USD` |
+| rate | numeric (> 0) | units of quote currency per 1 EUR, exact as published (no float rounding) |
+| source | text | `ECB via Frankfurter v1` |
+
+PK (`rate_date`, `base_currency`, `quote_currency`). Default coverage: 2016-09-01 → today (UTC).
+USD→BRL etc. are derived in `staging` (cross rate = BRL/USD on the same date).
+**ARS is not available**: the ECB does not publish an ARS reference rate, and the loader refuses
+`--quotes ARS`. ARS (needed to convert Mercado Libre prices) is left for a later task; a candidate
+source is BCRA (Frankfurter v2 exposes it as provider `BCRA`), not decided.
+Load rule: one transaction deletes the requested date range × currencies and inserts the fetched
+rows (idempotent; picks up revisions). Frankfurter snaps a range start that is not a publication
+day back to the previous one (a request from 2024-01-01 starts on 2023-12-29). Such leading dates
+are dropped, because the previous yearly chunk already covers them, but only up to 7 calendar days
+before the range start; an older date, or a date after the range end, is an error. A chunk (one
+calendar year per request) must be dense **for each currency** (≥ 80 % of weekdays have a rate
+for that `quote_currency`) or the run fails; an empty answer never deletes data.
+
+### `raw_enrichment.public_holidays` (`python -m ingestion.enrichment.holidays`)
+
+One row per holiday entry as returned by Nager.Date **v3**
+(`https://date.nager.at/api/v3/PublicHolidays/{year}/{countryCode}`; ADR-013. v3 is end-of-life
+on 2027-01-31, and migrating to v4 is PLAN 1.7). All holiday types are kept (`Public`, `Bank`,
+`School`, `Authorities`, `Optional`, `Observance`); filter in `staging`.
+
+| column | type | source field | rule |
+|--------|------|--------------|------|
+| country_code | char(2) | `countryCode` | required, must equal the requested country |
+| holiday_date | date | `date` | required, `YYYY-MM-DD` inside the requested year |
+| local_name | text? | `localName` | string or null |
+| name | text | `name` | required (English name) |
+| is_global | boolean | `global` | required; `true` = nationwide |
+| counties | text[]? | `counties` | ISO 3166-2 codes (e.g. `BR-SP`) or null (nationwide) |
+| holiday_types | text[] | `types` | required, non-empty |
+| is_fixed | boolean? | `fixed` | boolean or null/absent |
+| launch_year | int? | `launchYear` | integer or null |
+| source | text | — | `Nager.Date v3` |
+
+No primary key: rows are raw as returned, and the same date may appear for different counties or
+types. Any entry breaking a rule fails the whole run with nothing loaded, so a changed payload
+(e.g. the v4 field names) cannot load silently.
+Default coverage: **BR 2016–2018** (Olist years) and **AR 2026 → next year** (Mercado Libre years);
+override with `--only CC:YYYY[-YYYY]`. Load rule: one transaction deletes the requested
+(country, year) pairs and inserts the fetched rows. A (country, year) that answers with no entries
+fails the run and nothing changes.
+
+Schema drift (columns' names, order or types differ from this contract): each loader re-creates
+**only its own table** (`fx_rates` or `public_holidays`) inside the load transaction (no
+`CASCADE`). Any other missing table is created; another drifted data table is left untouched
+(warning logged). `_load_audit` is **never dropped**: if it drifts, the load fails (exit 1) and the
+transaction rolls back with nothing changed; migrate it by hand.
+
+### `raw_enrichment._load_audit` (append-only)
+
+| column | type | notes |
+|--------|------|-------|
+| load_id | uuid | one per run; PK (`load_id`, `table_name`) |
+| table_name | text | `fx_rates` or `public_holidays` |
+| row_count | bigint | rows inserted by this run |
+| params | jsonb | fx: `{start, end, base, quotes, source}`; holidays: `{countries_years: ["BR:2016", ...], source}` |
+| loaded_at | timestamptz | transaction time |
+
+---
+
 ## 3. Warehouse (PostgreSQL) — `draft`
 
 Layers: `raw_*` (as ingested) → `staging` (typed, cleaned, renamed) → `core` (star schema) → `marts` (metrics).

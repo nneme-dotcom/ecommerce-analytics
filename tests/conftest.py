@@ -109,11 +109,15 @@ def database_url(_pg_server_url: str) -> Iterator[str]:
 
 @pytest.fixture
 def db_conn(database_url: str):
-    """A connection to the throwaway database; every schema it creates is dropped afterwards."""
+    """A connection to the throwaway database; every schema it creates is dropped afterwards.
+
+    Autocommit, so the loaders' ``conn.transaction()`` blocks are real transactions (as in
+    production, where each run opens a fresh connection) and not savepoints of a test transaction.
+    """
     import psycopg
     from psycopg import sql
 
-    conn = psycopg.connect(database_url)
+    conn = psycopg.connect(database_url, autocommit=True)
     try:
         yield conn
     finally:
