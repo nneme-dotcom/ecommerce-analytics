@@ -294,6 +294,52 @@ transaction rolls back with nothing changed; migrate it by hand.
 Layers: `raw_*` (as ingested) → `staging` (typed, cleaned, renamed) → `core` (star schema) → `marts` (metrics).
 Detailed tables are defined in tasks 2.1–2.3.
 
+### Schemas and ownership (task 2.0, ADR-014, ADR-016)
+
+| schema | written by | materialisation | contents |
+|--------|-----------|-----------------|----------|
+| `raw_olist`, `raw_enrichment` (`raw_mercadolibre` from 2.5) | Python loaders only | tables | §1b, §2, §2b; dbt reads them as **sources** and never writes to them |
+| `staging` | dbt (`warehouse/models/staging/`) | views | one model per raw entity: typed, renamed, deduplicated |
+| `core` | dbt (`warehouse/models/core/`) | tables | star schema (2.1, 2.2) |
+| `marts` | dbt (`warehouse/models/marts/`) | tables | metrics (2.3, §4); the only schema the 2.4 API reads |
+
+dbt creates **exactly** these three schemas: `generate_schema_name` (warehouse/macros/) uses the
+folder's `+schema` verbatim (no `<target>_` prefix) and fails compilation for a model, seed or
+snapshot whose schema is anything else. The profile's target schema is `staging`, so even test
+failure tables (`--store-failures`) land there. CI checks after `dbt build` that no other schema
+appeared and that every `raw_*` relation and row count is unchanged.
+
+Naming: `stg_<source>__<entity>` (sources `olist`, `enrichment`), `dim_<entity>`, `fact_<process>`.
+Every model states its grain in a leading comment and in its YAML description.
+
+### Sources
+
+Declared in `warehouse/models/staging/<source>/_<source>__sources.yml` with **every** column of the
+raw table, in table order, with its type as printed by PostgreSQL `format_type()` (`text`,
+`character(3)`, `text[]`, ...). The singular test `assert_sources_match_contract` fails if a
+declared table's columns, order or types differ from the database, so the YAML, the loader DDL and
+§2/§2b must change together.
+
+| dbt source | schema | tables |
+|------------|--------|--------|
+| `olist` | `raw_olist` | the nine tables of §2 + `_load_audit` |
+| `enrichment` | `raw_enrichment` | `fx_rates`, `public_holidays`, `_load_audit` |
+
+Source tests (only what §2/§2b guarantee): `raw_olist` data tables have none (no keys or
+constraints in raw; key tests start in `staging`). `raw_enrichment.fx_rates`: unique
+(`rate_date`, `base_currency`, `quote_currency`), not null, `base_currency` = `EUR`, `rate` > 0,
+`source` = `ECB via Frankfurter v1`, `quote_currency` in (`BRL`, `USD`) as a **warning** (the
+loader accepts other ECB currencies via `--quotes`). `public_holidays`: not null on the required
+fields, `source` = `Nager.Date v3` (fails on the v4 migration until staging is updated, PLAN 1.7).
+Both `_load_audit` tables: unique (`load_id`, `table_name`), not null, `table_name` in the
+loader's tables.
+
+### `staging` models
+
+| model | grain | columns | notes |
+|-------|-------|---------|-------|
+| `stg_olist__product_category_translation` | one row per `product_category_name` | `product_category_name` text, `product_category_name_english` text | from `raw_olist.product_category_name_translation`, unchanged; tests: `product_category_name` unique + not null, English name not null. Task 2.0 smoke model |
+
 ---
 
 ## 4. Metric definitions — `draft`

@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.0 dbt skeleton and 2.5 ML raw loader; before 2.6 the owner creates the Neon project, the Environment `warehouse` (main only) with `WAREHOUSE_DATABASE_URL`, and pushes `archive.zip` to the data repo (ADR-014). Keep watching the daily ML runs for 1.3.
+- **Next up:** 2.0 dbt skeleton (in review) and 2.5 ML raw loader; before 2.6 the owner creates the Neon project, the Environment `warehouse` (main only) with `WAREHOUSE_DATABASE_URL`, and pushes `archive.zip` to the data repo (ADR-014). Keep watching the daily ML runs for 1.3.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,44 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-04 — analytics-engineer — 2.0 (branch `warehouse/dbt-skeleton`)
+Done: dbt project in `warehouse/`: `dbt_project.yml` (`staging` views; `core`/`marts` blocks
+commented until their first model, otherwise dbt warns about unused paths), `profiles.yml` (env only:
+`DBT_PG_HOST/PORT/USER/DBNAME/SSLMODE`, `DBT_ENV_SECRET_PG_PASSWORD`; target schema `staging`),
+`generate_schema_name` (models/seeds/snapshots must be in `staging`/`core`/`marts`, otherwise a
+compile error). Sources `olist` (nine tables + `_load_audit`) and `enrichment` (`fx_rates`,
+`public_holidays`, `_load_audit`) with every column and type; source tests only where §2/§2b
+guarantee them. Singular test `assert_sources_match_contract` (declared columns/order/types =
+database); generic tests `unique_combination_of_columns`, `positive` (no dbt packages). Smoke model
+`staging.stg_olist__product_category_translation`. CI job `dbt` (ci.yml): postgres:16 service,
+no secrets; `python -m warehouse.ci.fixture_db load` loads `warehouse/fixtures/` with the real
+loaders' functions, then `dbt build`, then `fixture_db check` (no schema besides
+staging/core/marts; raw relations and row counts unchanged). ADR-016; DATA_CONTRACT §3.
+Pins: dbt-core 1.12.6 + dbt-postgres 1.11.0, installed together with requirements.txt in a fresh
+venv (Python 3.13), `pip check` clean. Local run on PostgreSQL 16: `dbt build` PASS=37
+(1 view, 36 tests), WARN=0, ERROR=0; `check` ok (only `staging` created, 13 raw relations
+unchanged). Negative checks: a drifted source column name and type → the contract test returns
+exactly those rows; a model with no schema or `schema='raw_olist'` → compile error; an extra schema,
+a view in `raw_olist` and deleted fx rows → `check` exit 1 naming all three. `ruff check .` clean;
+`pytest`: 207 passed, 2 skipped. actionlint 1.7.12 clean on ci.yml.
+Not done / open: the CI job has not run on GitHub yet (first run is this PR). The star schema is 2.1.
+Proposed CLAUDE.md Commands rows (orchestrator):
+- `Install dbt (warehouse)` | `pip install -r requirements-dbt.txt`
+- `Load warehouse CI fixtures into a throwaway DB (env DATABASE_URL; never the real warehouse)` | `python -m warehouse.ci.fixture_db load --inventory <file>`
+- `dbt build (env DBT_PG_HOST, DBT_PG_PORT, DBT_PG_USER, DBT_ENV_SECRET_PG_PASSWORD, DBT_PG_DBNAME, DBT_PG_SSLMODE; all optional, local defaults)` | `dbt build --project-dir warehouse --profiles-dir warehouse`
+- `Check dbt created only staging/core/marts and left raw_* unchanged` | `python -m warehouse.ci.fixture_db check --inventory <file>`
+Gotchas for the next agent: run dbt from the repo root with `--project-dir warehouse
+--profiles-dir warehouse` (`fixture_db` is `python -m warehouse.ci.fixture_db`, a namespace
+package; it imports `ingestion`). A new model folder needs a `+schema` in `dbt_project.yml`
+(uncomment `core`/`marts`). A new raw table must be declared with **all** its columns and
+`format_type()` types, or `assert_sources_match_contract` fails (2.2 adds `raw_mercadolibre` this
+way, plus fixtures through the 2.5 loader). Generic test arguments go under `arguments:` (dbt 1.12
+style). The Olist fixture load logs "no manifest.json" on purpose (no checksums to maintain).
+Staging views on raw tables make a loader's drop-and-re-create on column drift fail (intended, §2).
+ADR-015 is taken by task 2.5 (PR #11), so this one is ADR-016.
+Files touched: warehouse/** (new), requirements-dbt.txt (new), .github/workflows/ci.yml,
+docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-016), docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-04 — orchestrator — Phase 1 review, Phase 2 plan
 Done: owner approved Phase 1 (1.3 stays open until 3 consecutive scheduled successes; 1.6/1.8

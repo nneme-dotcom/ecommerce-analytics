@@ -1,0 +1,121 @@
+# Source: schema raw_enrichment, loaded by `python -m ingestion.enrichment.fx_rates` and
+# `python -m ingestion.enrichment.holidays` (DATA_CONTRACT §2b). Values are typed in raw.
+# tests/assert_sources_match_contract.sql checks that the columns and types declared here are
+# exactly those of the database tables (types as printed by format_type()).
+version: 2
+
+sources:
+  - name: enrichment
+    description: Public reference data (ECB FX rates via Frankfurter v1, public holidays via Nager.Date v3).
+    schema: raw_enrichment
+    tables:
+      - name: fx_rates
+        description: >
+          ECB euro reference rates, one row per publication day and quote currency (no rows on
+          weekends or TARGET holidays). Grain = PK (rate_date, base_currency, quote_currency).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [rate_date, base_currency, quote_currency]
+        columns:
+          - name: rate_date
+            data_type: date
+            data_tests: [not_null]
+          - name: base_currency
+            data_type: character(3)
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [EUR]
+          - name: quote_currency
+            data_type: character(3)
+            description: >
+              The contract lists BRL and USD (the default load). The loader accepts other ECB
+              currencies through --quotes, so another value is a warning, not a build failure;
+              staging uses only BRL and USD.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [BRL, USD]
+                  config:
+                    severity: warn
+          - name: rate
+            data_type: numeric
+            description: Units of quote currency per 1 EUR, exact as published.
+            data_tests: [not_null, positive]
+          - name: source
+            data_type: text
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [ECB via Frankfurter v1]
+
+      - name: public_holidays
+        description: >
+          One row per holiday entry as returned by Nager.Date v3. No primary key: the same date
+          may appear for different counties or types. All holiday types are kept; filter
+          'Public' = any(holiday_types) in staging.
+        columns:
+          - name: country_code
+            data_type: character(2)
+            data_tests: [not_null]
+          - name: holiday_date
+            data_type: date
+            data_tests: [not_null]
+          - name: local_name
+            data_type: text
+          - name: name
+            data_type: text
+            data_tests: [not_null]
+          - name: is_global
+            data_type: boolean
+            description: true = nationwide.
+            data_tests: [not_null]
+          - name: counties
+            data_type: text[]
+            description: ISO 3166-2 codes (e.g. BR-SP); null = nationwide.
+          - name: holiday_types
+            data_type: text[]
+            data_tests: [not_null]
+          - name: is_fixed
+            data_type: boolean
+          - name: launch_year
+            data_type: integer
+          - name: source
+            data_type: text
+            description: A different value means the payload version changed (v4 migration, PLAN 1.7).
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [Nager.Date v3]
+
+      - name: _load_audit
+        description: Append-only, one row per load run and table (DATA_CONTRACT §2b).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [load_id, table_name]
+        columns:
+          - name: load_id
+            data_type: uuid
+            data_tests: [not_null]
+          - name: table_name
+            data_type: text
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [fx_rates, public_holidays]
+          - name: row_count
+            data_type: bigint
+            data_tests: [not_null]
+          - name: params
+            data_type: jsonb
+            data_tests: [not_null]
+          - name: loaded_at
+            data_type: timestamp with time zone
+            data_tests: [not_null]

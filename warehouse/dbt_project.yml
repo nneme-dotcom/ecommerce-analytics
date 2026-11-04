@@ -1,0 +1,31 @@
+# dbt project for the ecommerce-analytics warehouse (ADR-014, DATA_CONTRACT §3).
+# Layers: raw_* (loaded by Python, read here as sources only) -> staging (views) -> core (star
+# schema, tables) -> marts (metrics, tables). Run from the repo root:
+#   dbt build --project-dir warehouse --profiles-dir warehouse
+name: ecommerce_analytics
+version: "0.1.0"
+profile: ecommerce_analytics
+require-dbt-version: [">=1.12.0", "<1.13.0"]
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "logs"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+# The folder decides the schema; generate_schema_name rejects anything else (macros/), so a model
+# in a folder without a +schema here fails to compile. Uncomment core/marts with their first model
+# (tasks 2.1 / 2.3): dbt warns about configuration paths that match no model.
+models:
+  ecommerce_analytics:
+    staging:
+      +schema: staging
+      +materialized: view
+    # core:
+    #   +schema: core
+    #   +materialized: table
+    # marts:
+    #   +schema: marts
+    #   +materialized: table

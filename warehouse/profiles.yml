@@ -1,0 +1,28 @@
+# dbt connection profile. Every value comes from the environment (env_var); nothing secret lives in
+# this file. The defaults suit a local throwaway PostgreSQL (trust auth, no password).
+#
+#   DBT_PG_HOST                  default localhost
+#   DBT_PG_PORT                  default 5432
+#   DBT_PG_USER                  default postgres
+#   DBT_ENV_SECRET_PG_PASSWORD   default empty. The DBT_ENV_SECRET_ prefix makes dbt scrub the
+#                                value from its logs and refuse it outside profiles.yml/packages.yml.
+#   DBT_PG_DBNAME                default ecommerce
+#   DBT_PG_SSLMODE               default prefer (the Neon warehouse uses require, ADR-014)
+#
+# `schema` is fixed to `staging`: generate_schema_name (macros/) gives every model, seed and snapshot
+# its own schema (staging, core or marts), so the target schema is only a fallback for tests and is
+# never a fourth schema.
+ecommerce_analytics:
+  target: warehouse
+  outputs:
+    warehouse:
+      type: postgres
+      host: "{{ env_var('DBT_PG_HOST', 'localhost') }}"
+      port: "{{ env_var('DBT_PG_PORT', '5432') | as_number }}"
+      user: "{{ env_var('DBT_PG_USER', 'postgres') }}"
+      password: "{{ env_var('DBT_ENV_SECRET_PG_PASSWORD', '') }}"
+      dbname: "{{ env_var('DBT_PG_DBNAME', 'ecommerce') }}"
+      sslmode: "{{ env_var('DBT_PG_SSLMODE', 'prefer') }}"
+      schema: staging
+      threads: 4
+      connect_timeout: 10

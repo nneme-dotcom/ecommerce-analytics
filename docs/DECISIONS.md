@@ -241,3 +241,37 @@ alongside Phase 2.
 workflow summary keep this visible. 100 CU-hours a month cannot keep a compute awake all month, so the
 API must tolerate cold starts and must not keep Neon awake. If limits are hit, the dbt project runs
 unchanged on any PostgreSQL; Phase 4 (AWS) may move the warehouse without changing the layout.
+
+## ADR-016 — dbt CI: raw fixtures loaded by the real loaders; profile and pins (2026-11-04)
+
+**Context.** Task 2.0 runs `dbt build` in CI against a throwaway PostgreSQL with no secrets. The raw
+tables must exist first. dbt seeds would be the usual tool, but seeds are dbt-owned tables: putting
+them in `raw_*` breaks ADR-014 (raw schemas are owned by the loaders), and seeds elsewhere would not
+have the loaders' DDL (`raw_enrichment` is typed, with a PK and a CHECK).
+
+**Decision.**
+- **Fixtures go through the real loaders.** `warehouse/fixtures/` holds synthetic Olist CSVs (contract
+  headers) and API-shaped JSON (a Frankfurter v1 response, Nager.Date v3 responses).
+  `python -m warehouse.ci.fixture_db load` feeds them to `ingestion.olist.load.prepare/load`,
+  `fx_rates.parse_rates/load_rates` and `holidays.parse_holidays/load_holidays`, so CI tables have
+  exactly the production DDL and the fixtures pass the loaders' validation. No dbt seeds. The
+  warehouse fixtures are separate from the loader-test fixtures (`tests/olist/fixtures/`), so a
+  loader edge case cannot break model tests and vice versa.
+- **Guards.** `generate_schema_name` allows only `staging`/`core`/`marts` for models, seeds and
+  snapshots (compile error otherwise). After the build, `fixture_db check` fails on any other schema
+  and on any change to a `raw_*` relation (added, dropped, row count). The singular test
+  `assert_sources_match_contract` compares the declared source columns and types with the database.
+- **Profile.** `warehouse/profiles.yml` reads only `env_var()`: `DBT_PG_HOST`, `DBT_PG_PORT`,
+  `DBT_PG_USER`, `DBT_ENV_SECRET_PG_PASSWORD`, `DBT_PG_DBNAME`, `DBT_PG_SSLMODE`, defaulting to a local
+  trust-auth server (`localhost:5432`, `postgres`, no password, `ecommerce`, `prefer`). Not libpq's
+  `PG*` names, which would silently redirect the loaders and the pytest fixtures in the same shell. The
+  `DBT_ENV_SECRET_` prefix makes dbt scrub the password from logs. Target schema `staging`.
+- **Pins.** `dbt-core==1.12.6`, `dbt-postgres==1.11.0` in `requirements-dbt.txt` (installed together
+  with `requirements.txt` on 2026-11-04, `pip check` clean). dbt Core v1, not the newer dbt v2
+  engine, as ADR-014 chose `dbt-core`. No dbt packages (no `dbt deps` network step): the two generic
+  tests needed (`unique_combination_of_columns`, `positive`) live in `warehouse/tests/generic/`.
+
+**Consequences.** CI also exercises the loaders' public functions; a loader signature change breaks
+the dbt job, which is wanted. Models get fixture coverage only for cases written into
+`warehouse/fixtures/`, which each modelling task extends. Task 2.6 maps the split
+`WAREHOUSE_DATABASE_URL` onto the six profile variables.
