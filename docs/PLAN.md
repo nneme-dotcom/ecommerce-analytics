@@ -16,13 +16,14 @@ Status: `todo` · `in progress` · `in review` · `done`.
 
 | # | Task | Owner | Status | Acceptance criteria |
 |---|------|-------|--------|---------------------|
-| 1.1 | ML OAuth client with PKCE + refresh rotation | data-engineer | in review | Unit tests with mocked HTTP; never logs tokens |
-| 1.2 | ML daily snapshot job (best sellers → products → offers, 5 categories) | data-engineer | in review | Writes files matching DATA_CONTRACT; idempotent per day; request cap |
+| 1.1 | ML OAuth client with PKCE + refresh rotation | data-engineer | done | Unit tests with mocked HTTP; never logs tokens |
+| 1.2 | ML daily snapshot job (best sellers → products → offers, 5 categories) | data-engineer | done | Writes files matching DATA_CONTRACT; idempotent per day; request cap |
 | 1.3 | Scheduled workflow running 1.2 daily + persisting rotated refresh token | devops | in review | 3 consecutive successful daily runs |
-| 1.4 | Olist download + load into PostgreSQL staging | data-engineer | in review | Row counts match source; reproducible from one command |
-| 1.5 | Enrichment: FX rates (ECB) and holidays (Nager.Date) | data-engineer | in review | Loaded to staging with tests |
+| 1.4 | Olist download + load into PostgreSQL staging | data-engineer | done | Row counts match source; reproducible from one command |
+| 1.5 | Enrichment: FX rates (ECB) and holidays (Nager.Date) | data-engineer | done | Loaded to `raw_enrichment` with tests; live run 41806204617 |
 | 1.6 | Olist download hardening (PR #7 low findings) | data-engineer | todo | Hash bytes while streaming the `COPY` instead of a second read (load.py:106,166); byte cap on the HTTP download (download.py:93-95); map `RuntimeError`/`NotImplementedError` from `zipfile` (encrypted/unsupported members) to `DownloadError` (download.py:151); `cleanup_stale` deletes only files the tool created (download.py:175-182); note/resolve config exit code 2 (Olist, enrichment) vs 5 (ML snapshot) |
 | 1.7 | Migrate holidays to Nager.Date v4 (before v3 EOL 2027-01-31) | data-engineer | todo | v4 endpoint and fields verified by a live run; loader, DATA_CONTRACT §2b and ADR updated in one PR |
+| 1.8 | Enrichment hardening (PR #8 round-3 low findings) | data-engineer | todo | `store.ensure_schema` checks `_load_audit` before touching the target table (store.py:107-130); drift check also covers constraints (PK, NOT NULL, CHECK) or §2b states the gap; test that 8 days before a chunk start is rejected (test_fx_rates.py:306-313); audit-drift holiday test asserts the earlier rows survive (test_holidays.py:256-276) |
 
 ## Phase 2 — Model and metrics
 
