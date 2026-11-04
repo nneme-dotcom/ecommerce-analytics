@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: stg_olist__product_category_translation
+    description: >
+      Olist product category names (Portuguese) with their English translation.
+      Grain: one row per product_category_name. View in schema staging.
+    columns:
+      - name: product_category_name
+        description: Category name as used in raw_olist.products.product_category_name.
+        data_tests: [not_null, unique]
+      - name: product_category_name_english
+        description: English category name.
+        data_tests: [not_null]

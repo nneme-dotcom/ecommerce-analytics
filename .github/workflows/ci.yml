@@ -41,6 +41,56 @@ jobs:
       - name: Test
         run: pytest -q
 
+  dbt:
+    name: dbt build (fixtures)
+    runs-on: ubuntu-latest
+    # Throwaway PostgreSQL filled with the synthetic fixtures in warehouse/fixtures by the real
+    # loaders (ADR-016). No secrets: the test-only credentials below never leave the job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: warehouse_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Loaders (fixtures) connect with DATABASE_URL; dbt reads the profile fields (warehouse/profiles.yml).
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/warehouse_ci
+      DBT_PG_HOST: localhost
+      DBT_PG_PORT: "5432"
+      DBT_PG_USER: postgres
+      DBT_ENV_SECRET_PG_PASSWORD: postgres
+      DBT_PG_DBNAME: warehouse_ci
+      DBT_PG_SSLMODE: disable
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dbt.txt pytest
+      - name: Load raw fixtures with the loaders
+        env:
+          # Opt-in for `load`, which replaces raw tables: set here only (throwaway service DB).
+          FIXTURE_DB_ALLOW: "1"
+        run: python -m warehouse.ci.fixture_db load --inventory "$RUNNER_TEMP/raw_inventory.json"
+      - name: dbt build
+        run: dbt build --project-dir warehouse --profiles-dir warehouse
+      - name: Check schemas (only staging/core/marts created, raw_* untouched)
+        run: python -m warehouse.ci.fixture_db check --inventory "$RUNNER_TEMP/raw_inventory.json"
+      # The dbt guard tests (schema rule, contract test) need dbt, so the python job skips them.
+      - name: Test the dbt guards (temp project copies, own throwaway databases)
+        run: pytest -q tests/warehouse
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest

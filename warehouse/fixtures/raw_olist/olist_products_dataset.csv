@@ -1,0 +1,5 @@
+"product_id","product_category_name","product_name_lenght","product_description_lenght","product_photos_qty","product_weight_g","product_length_cm","product_height_cm","product_width_cm"
+"p0000000000000000000000000000001","beleza_saude",40,287,1,500,19,8,13
+"p0000000000000000000000000000002","perfumaria",44,276,1,1000,30,18,20
+"p0000000000000000000000000000003","cama_mesa_banho",46,250,2,2200,40,10,30
+"p0000000000000000000000000000004",,,,,700,25,10,15

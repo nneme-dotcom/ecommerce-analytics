@@ -1,0 +1,5 @@
+# dbt build artefacts and local state
+target/
+logs/
+dbt_packages/
+.user.yml

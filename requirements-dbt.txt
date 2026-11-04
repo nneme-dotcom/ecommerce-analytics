@@ -1,0 +1,8 @@
+# dbt toolchain for warehouse/ (ADR-014). Separate from the runtime requirements.txt: only the
+# dbt CI job and the warehouse workflow install it. dbt-postgres brings psycopg2-binary, used by
+# dbt only (the loaders keep psycopg 3, ADR-011).
+# Install: pip install -r requirements-dbt.txt
+# Pair verified on 2026-11-04 (fresh venv, `pip check` clean): dbt-postgres 1.11.0 requires
+# dbt-core>=1.8.0rc1,<2.0 and resolved dbt-adapters 1.24.5, dbt-common 1.39.0, psycopg2-binary 2.9.13.
+dbt-core==1.12.6
+dbt-postgres==1.11.0

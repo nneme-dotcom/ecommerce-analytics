@@ -1,0 +1,11 @@
+{
+  "BR:2017": [
+    {"date": "2017-10-12", "localName": "Nossa Senhora Aparecida", "name": "Our Lady of Aparecida", "countryCode": "BR", "fixed": true, "global": true, "counties": null, "launchYear": null, "types": ["Public"]},
+    {"date": "2017-11-02", "localName": "Dia de Finados", "name": "All Souls' Day", "countryCode": "BR", "fixed": true, "global": true, "counties": null, "launchYear": null, "types": ["Public"]},
+    {"date": "2017-11-20", "localName": "Dia da Consciência Negra", "name": "Black Awareness Day", "countryCode": "BR", "fixed": true, "global": false, "counties": ["BR-SP", "BR-RJ"], "launchYear": null, "types": ["Optional"]}
+  ],
+  "AR:2026": [
+    {"date": "2026-11-23", "localName": "Día de la Soberanía Nacional", "name": "National Sovereignty Day", "countryCode": "AR", "fixed": false, "global": true, "counties": null, "launchYear": null, "types": ["Public"]},
+    {"date": "2026-12-08", "localName": "Inmaculada Concepción de María", "name": "Immaculate Conception Day", "countryCode": "AR", "fixed": true, "global": true, "counties": null, "launchYear": null, "types": ["Public"]}
+  ]
+}

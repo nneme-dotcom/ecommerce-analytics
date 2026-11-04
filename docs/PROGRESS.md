@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.0 dbt skeleton; 2.5 ML raw loader is in review; before 2.6 the owner creates the Neon project, the Environment `warehouse` (main only) with `WAREHOUSE_DATABASE_URL`, and pushes `archive.zip` to the data repo (ADR-014). Keep watching the daily ML runs for 1.3.
+- **Next up:** 2.6 Neon load workflow (owner prerequisites done 2026-11-04: Neon project in EU Frankfurt (PostgreSQL version not yet confirmed), Environment `warehouse` with `WAREHOUSE_DATABASE_URL`, `olist/archive.zip` in the data repo), then 2.1. Follow-ups 1.6–1.11 alongside. Keep watching the daily ML runs for 1.3.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,75 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-04 — analytics-engineer — 2.0 (branch `warehouse/dbt-skeleton`)
+Done: dbt project in `warehouse/`: `dbt_project.yml` (`staging` views; `core`/`marts` blocks
+commented until their first model, otherwise dbt warns about unused paths), `profiles.yml` (env only:
+`DBT_PG_HOST/PORT/USER/DBNAME/SSLMODE`, `DBT_ENV_SECRET_PG_PASSWORD`; target schema `staging`),
+`generate_schema_name` (models/seeds/snapshots must be in `staging`/`core`/`marts`, otherwise a
+compile error). Sources `olist` (nine tables + `_load_audit`) and `enrichment` (`fx_rates`,
+`public_holidays`, `_load_audit`) with every column and type; source tests only where §2/§2b
+guarantee them. Singular test `assert_sources_match_contract` (declared columns/order/types =
+database); generic tests `unique_combination_of_columns`, `positive` (no dbt packages). Smoke model
+`staging.stg_olist__product_category_translation`. CI job `dbt` (ci.yml): postgres:16 service,
+no secrets; `python -m warehouse.ci.fixture_db load` loads `warehouse/fixtures/` with the real
+loaders' functions, then `dbt build`, then `fixture_db check` (no schema besides
+staging/core/marts; raw relations and row counts unchanged). ADR-016; DATA_CONTRACT §3.
+Pins: dbt-core 1.12.6 + dbt-postgres 1.11.0, installed together with requirements.txt in a fresh
+venv (Python 3.13), `pip check` clean. Local run on PostgreSQL 16: `dbt build` PASS=37
+(1 view, 36 tests), WARN=0, ERROR=0; `check` ok (only `staging` created, 13 raw relations
+unchanged). Negative checks: a drifted source column name and type → the contract test returns
+exactly those rows; a model with no schema or `schema='raw_olist'` → compile error; an extra schema,
+a view in `raw_olist` and deleted fx rows → `check` exit 1 naming all three. `ruff check .` clean;
+`pytest`: 207 passed, 2 skipped. actionlint 1.7.12 clean on ci.yml.
+Not done / open: the CI job has not run on GitHub yet (first run is this PR). The star schema is 2.1.
+Proposed CLAUDE.md Commands rows (orchestrator):
+- `Install dbt (warehouse)` | `pip install -r requirements-dbt.txt`
+- `Load warehouse CI fixtures into a throwaway DB (env DATABASE_URL, FIXTURE_DB_ALLOW=1; refuses a DB with more rows than the fixtures)` | `FIXTURE_DB_ALLOW=1 python -m warehouse.ci.fixture_db load --inventory <file>`
+- `dbt build (env DBT_PG_HOST, DBT_PG_PORT, DBT_PG_USER, DBT_ENV_SECRET_PG_PASSWORD, DBT_PG_DBNAME, DBT_PG_SSLMODE; all optional, local defaults)` | `dbt build --project-dir warehouse --profiles-dir warehouse`
+- `Check dbt created only staging/core/marts and left raw_* and public unchanged` | `python -m warehouse.ci.fixture_db check --inventory <file>`
+- `Test the dbt guards (needs dbt; temp project copies)` | `pytest tests/warehouse`
+Gotchas for the next agent: run dbt from the repo root with `--project-dir warehouse
+--profiles-dir warehouse` (`fixture_db` is `python -m warehouse.ci.fixture_db`, a namespace
+package; it imports `ingestion`). A new model folder needs a `+schema` in `dbt_project.yml`
+(uncomment `core`/`marts`). A new raw table must be declared with **all** its columns and
+`format_type()` types, or `assert_sources_match_contract` fails (2.2 adds `raw_mercadolibre` this
+way, plus fixtures through the 2.5 loader). Generic test arguments go under `arguments:` (dbt 1.12
+style). The Olist fixture load logs "no manifest.json" on purpose (no checksums to maintain).
+Staging views on raw tables make a loader's drop-and-re-create on column drift fail (intended, §2).
+ADR-015 is taken by task 2.5 (PR #11), so this one is ADR-016.
+Files touched: warehouse/** (new), requirements-dbt.txt (new), .github/workflows/ci.yml,
+docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-016), docs/PLAN.md, docs/PROGRESS.md
+Review round 1 (PR #12, same day): (1) snapshot `target_schema` bypass closed:
+`generate_schema_name` now rejects `target_schema`/`target_database` on any node and a target
+schema outside staging/core/marts (parse-time, so every command fails); new `on-run-start` hook
+`assert_node_schemas` re-checks every node's final schema/database before anything runs. Verified
+the reviewer's `config(schema='staging', target_schema='raw_olist')` resolved to `raw_olist` with the
+old macro and fails parsing now. (2) ci.yml comment ADR-015 → ADR-016. (3) `fixture_db load` refuses
+(exit 2, nothing written) without `FIXTURE_DB_ALLOW=1` (set only on the CI load step) and when any
+table it writes has more rows than the fixtures (e.g. `raw_olist.orders`). (4) `check` compares a
+full inventory of `raw_*` and `public`: per relation kind, column signature (names, order,
+`format_type()`), row count, md5 of the rows sorted as text, view/index definitions; plus
+constraints, triggers, functions, standalone types. (5) fixtures README: transactional rows
+synthetic, reference values (3 category translations, holidays, FX rates) real public facts.
+(6) `assert_sources_match_contract`: a column without `data_type` is a failure row. (7) dbt job
+checkout `persist-credentials: false`. New tests: `tests/warehouse/test_fixture_db.py` (25: both
+refusals, idempotent reload, check catching a same-count UPDATE, ADD COLUMN, type change, function
+in `raw_olist`, table/view in `public`, view/index/constraint/type in raw, deleted rows, dropped
+table, extra schema, missing staging) and `tests/warehouse/test_dbt_guards.py` (12, need dbt, so
+skipped in the python job; the dbt job now installs pytest and runs `pytest -q tests/warehouse`
+after `check`): real `dbt parse`/`compile`/`run`/`test` on temp project copies (snapshot
+target_schema/target_database in config or dbt_project.yml, raw/missing schemas, bad target schema,
+hook stopping a run when the macro is weakened, missing `data_type` → exactly one failure row).
+Results on PostgreSQL 16 (local cluster): `ruff check .` clean; `pytest` 244 passed, 2 skipped;
+`fixture_db load` → `dbt build` PASS=38 (1 hook, 1 view, 36 tests) → `check` ok (17 relations).
+Gotcha: `check` hashes all rows, so it is for fixture DBs only; dbt creates a model's schema
+*before* on-run-start, so the hook cannot prevent an empty stray schema (the macro and `check` do).
+Files touched (round 1): warehouse/ci/fixture_db.py, warehouse/macros/generate_schema_name.sql,
+warehouse/macros/assert_node_schemas.sql (new), warehouse/dbt_project.yml,
+warehouse/tests/assert_sources_match_contract.sql, warehouse/README.md, warehouse/fixtures/README.md,
+tests/warehouse/ (new), .github/workflows/ci.yml, docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md
+(ADR-016), docs/PROGRESS.md
 
 ### 2026-11-04 — data-engineer — 2.5 (PR #11, branch `ingestion/ml-raw-load`, after review round 1)
 Done: DATA_CONTRACT **§1b `raw_mercadolibre`** (contract first): `runs`, `highlights`, `products`,

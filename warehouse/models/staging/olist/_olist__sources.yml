@@ -1,0 +1,138 @@
+# Source: schema raw_olist, loaded by `python -m ingestion.olist.load` (DATA_CONTRACT §2).
+# Every data column is `text`, named exactly as the CSV header and in the same order (upstream
+# typos kept: product_name_lenght, product_description_lenght). No keys or constraints in raw, so
+# data tests on keys belong in staging (task 2.1). tests/assert_sources_match_contract.sql checks
+# that the columns declared here are exactly those of the database tables.
+version: 2
+
+sources:
+  - name: olist
+    description: Olist Brazilian e-commerce public dataset (Kaggle olistbr/brazilian-ecommerce), 2016-2018, loaded unchanged.
+    schema: raw_olist
+    tables:
+      - name: customers
+        description: One row per CSV record of olist_customers_dataset.csv. customer_id is per order; customer_unique_id is the person.
+        columns:
+          - {name: customer_id, data_type: text}
+          - {name: customer_unique_id, data_type: text}
+          - {name: customer_zip_code_prefix, data_type: text}
+          - {name: customer_city, data_type: text}
+          - {name: customer_state, data_type: text}
+
+      - name: geolocation
+        description: One row per CSV record of olist_geolocation_dataset.csv. Many rows per zip prefix (not unique).
+        columns:
+          - {name: geolocation_zip_code_prefix, data_type: text}
+          - {name: geolocation_lat, data_type: text}
+          - {name: geolocation_lng, data_type: text}
+          - {name: geolocation_city, data_type: text}
+          - {name: geolocation_state, data_type: text}
+
+      - name: order_items
+        description: One row per CSV record of olist_order_items_dataset.csv.
+        columns:
+          - {name: order_id, data_type: text}
+          - {name: order_item_id, data_type: text}
+          - {name: product_id, data_type: text}
+          - {name: seller_id, data_type: text}
+          - {name: shipping_limit_date, data_type: text}
+          - {name: price, data_type: text}
+          - {name: freight_value, data_type: text}
+
+      - name: order_payments
+        description: One row per CSV record of olist_order_payments_dataset.csv.
+        columns:
+          - {name: order_id, data_type: text}
+          - {name: payment_sequential, data_type: text}
+          - {name: payment_type, data_type: text}
+          - {name: payment_installments, data_type: text}
+          - {name: payment_value, data_type: text}
+
+      - name: order_reviews
+        description: One row per CSV record of olist_order_reviews_dataset.csv. review_id is not unique on its own; messages may contain line breaks.
+        columns:
+          - {name: review_id, data_type: text}
+          - {name: order_id, data_type: text}
+          - {name: review_score, data_type: text}
+          - {name: review_comment_title, data_type: text}
+          - {name: review_comment_message, data_type: text}
+          - {name: review_creation_date, data_type: text}
+          - {name: review_answer_timestamp, data_type: text}
+
+      - name: orders
+        description: One row per CSV record of olist_orders_dataset.csv.
+        columns:
+          - {name: order_id, data_type: text}
+          - {name: customer_id, data_type: text}
+          - {name: order_status, data_type: text}
+          - {name: order_purchase_timestamp, data_type: text}
+          - {name: order_approved_at, data_type: text}
+          - {name: order_delivered_carrier_date, data_type: text}
+          - {name: order_delivered_customer_date, data_type: text}
+          - {name: order_estimated_delivery_date, data_type: text}
+
+      - name: products
+        description: One row per CSV record of olist_products_dataset.csv. Rename the *_lenght typos to *_length in staging.
+        columns:
+          - {name: product_id, data_type: text}
+          - {name: product_category_name, data_type: text}
+          - {name: product_name_lenght, data_type: text}
+          - {name: product_description_lenght, data_type: text}
+          - {name: product_photos_qty, data_type: text}
+          - {name: product_weight_g, data_type: text}
+          - {name: product_length_cm, data_type: text}
+          - {name: product_height_cm, data_type: text}
+          - {name: product_width_cm, data_type: text}
+
+      - name: sellers
+        description: One row per CSV record of olist_sellers_dataset.csv.
+        columns:
+          - {name: seller_id, data_type: text}
+          - {name: seller_zip_code_prefix, data_type: text}
+          - {name: seller_city, data_type: text}
+          - {name: seller_state, data_type: text}
+
+      - name: product_category_name_translation
+        description: One row per CSV record of product_category_name_translation.csv (Portuguese category name to English).
+        columns:
+          - {name: product_category_name, data_type: text}
+          - {name: product_category_name_english, data_type: text}
+
+      - name: _load_audit
+        description: Append-only, one row per table per load (DATA_CONTRACT §2). Latest load per table = max(loaded_at).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [load_id, table_name]
+        columns:
+          - name: load_id
+            data_type: uuid
+            data_tests: [not_null]
+          - name: table_name
+            data_type: text
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values:
+                      - customers
+                      - geolocation
+                      - order_items
+                      - order_payments
+                      - order_reviews
+                      - orders
+                      - products
+                      - sellers
+                      - product_category_name_translation
+          - name: source_file
+            data_type: text
+            data_tests: [not_null]
+          - name: row_count
+            data_type: bigint
+            data_tests: [not_null]
+          - name: file_sha256
+            data_type: character(64)
+            data_tests: [not_null]
+          - name: loaded_at
+            data_type: timestamp with time zone
+            data_tests: [not_null]
