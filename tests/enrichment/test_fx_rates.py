@@ -1,6 +1,7 @@
 """FX rates: mocked Frankfurter v1 (shape from its source code, see ADR-012) + throwaway DB."""
 
 import json
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -22,12 +23,27 @@ QUOTES = ("BRL", "USD")
 TODAY = date(2026, 11, 3)
 
 
-def fake_series(start: date, end: date, quotes=QUOTES, bump=Decimal("0")) -> dict:
-    """A v1 interval payload: one key per weekday, deterministic rates."""
+TARGET_CLOSED = {(1, 1), (5, 1), (12, 25), (12, 26)}  # fixed TARGET holidays (Easter ignored)
+
+
+def is_publication_day(day: date) -> bool:
+    return day.weekday() < 5 and (day.month, day.day) not in TARGET_CLOSED and day < TODAY
+
+
+def fake_series(start: date, end: date, quotes=QUOTES, bump=Decimal("0"), snap=True) -> dict:
+    """A v1 interval payload: one key per publication day, deterministic rates.
+
+    Like Frankfurter, a start that is not a publication day snaps back to the previous one
+    (a request from 2024-01-01 starts on 2023-12-29).
+    """
+    first = start
+    if snap:
+        while not is_publication_day(first) and first > start - timedelta(days=10):
+            first -= timedelta(days=1)
     rates = {}
-    day = start
+    day = first
     while day <= end:
-        if day.weekday() < 5 and day < TODAY:
+        if is_publication_day(day):
             rates[day.isoformat()] = {
                 q: Decimal("3.5") + Decimal(day.toordinal() % 100) / 100 + bump + i
                 for i, q in enumerate(quotes)
@@ -84,6 +100,9 @@ def test_fetch_requests_one_chunk_per_year_with_v1_params():
     assert len(paths) == 11
     assert all(dict(r.url.params) == {"from": "EUR", "to": "BRL,USD"} for r in fake.requests)
     assert rows == sorted(rows)
+    keys = [(r.rate_date, r.quote_currency) for r in rows]
+    assert len(keys) == len(set(keys))  # snapped chunk starts are not duplicated
+    assert min(r.rate_date for r in rows) == date(2016, 9, 1)
     assert {r.quote_currency for r in rows} == {"BRL", "USD"}
     assert all(isinstance(r.rate, Decimal) for r in rows)
 
@@ -95,16 +114,34 @@ def test_parse_rejects_bad_payloads():
         parse_rates({"base": "EUR"}, start, end, QUOTES)
     with pytest.raises(FetchError, match="unexpected base"):
         parse_rates({**good, "base": "USD"}, start, end, QUOTES)
-    with pytest.raises(FetchError, match="outside the requested range"):
+    with pytest.raises(FetchError, match="after the requested range"):
         parse_rates({**good, "rates": {"2017-02-01": {"BRL": 3}}}, start, end, QUOTES)
+    with pytest.raises(FetchError, match="unexpected amount"):
+        parse_rates({**good, "amount": "abc"}, start, end, QUOTES)
+    with pytest.raises(FetchError, match="not a positive number"):
+        bad = {"2017-01-02": {"BRL": Decimal("NaN"), "USD": 1}}
+        parse_rates({**good, "rates": bad}, start, end, QUOTES)
     with pytest.raises(FetchError, match="unrequested currency"):
         parse_rates({**good, "rates": {"2017-01-02": {"GBP": 1}}}, start, end, QUOTES)
-    with pytest.raises(FetchError, match="not positive"):
+    with pytest.raises(FetchError, match="not a positive number"):
         parse_rates({**good, "rates": {"2017-01-02": {"BRL": 0, "USD": 1}}}, start, end, QUOTES)
+    with pytest.raises(FetchError, match="not a positive number"):
+        bad = {"2017-01-02": {"BRL": Decimal("-1"), "USD": 1}}
+        parse_rates({**good, "rates": bad}, start, end, QUOTES)
     with pytest.raises(FetchError, match="not a number"):
         parse_rates({**good, "rates": {"2017-01-02": {"BRL": "3.4"}}}, start, end, QUOTES)
     with pytest.raises(FetchError, match=r"no rates at all for \['USD'\]"):
         parse_rates(fake_series(start, end, ("BRL",)), start, end, QUOTES)
+
+
+def test_start_snapped_to_previous_publication_day_is_dropped(caplog):
+    start, end = date(2024, 1, 1), date(2024, 1, 31)
+    payload = fake_series(start, end)
+    assert payload["start_date"] == "2023-12-29"  # as Frankfurter answers
+    with caplog.at_level(logging.DEBUG, logger="ingestion.enrichment.fx_rates"):
+        rows = parse_rates(payload, start, end, QUOTES)
+    assert min(r.rate_date for r in rows) == date(2024, 1, 2)
+    assert "dropped 1 date(s) before the start: 2023-12-29" in caplog.text
 
 
 def test_density_check_catches_downsampled_series():
@@ -164,7 +201,7 @@ def test_load_is_idempotent_and_replaces_only_the_requested_range(db_conn):
     rows = fetch_rates(client_for(FakeFrankfurter()), start, end, QUOTES, today=TODAY)
     load_rates(db_conn, rows, start, end, QUOTES)
     first = fx_table(db_conn)
-    assert len(first) == len(rows) == 2 * 260
+    assert len(first) == len(rows) == 2 * 257  # 2017: 260 weekdays, 3 TARGET-closed
     load_rates(db_conn, rows, start, end, QUOTES)
     assert fx_table(db_conn) == first
 
@@ -202,5 +239,23 @@ def test_main_loads_into_database(database_url, db_conn, monkeypatch, caplog):
         ["--start", "2018-01-01", "--end", "2018-01-31"], client=client_for(FakeFrankfurter())
     )
     assert code == 0
-    assert len(fx_table(db_conn)) == 2 * 23
+    assert len(fx_table(db_conn)) == 2 * 22  # Jan 2018: 23 weekdays minus Jan 1
     assert database_url not in caplog.text
+
+
+def test_table_with_drifted_column_type_is_recreated(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA raw_enrichment")
+        cur.execute(
+            "CREATE TABLE raw_enrichment.fx_rates (rate_date date, base_currency char(3),"
+            " quote_currency char(3), rate double precision, source text)"
+        )
+    rows = [FxRate(date(2017, 1, 2), "EUR", "BRL", Decimal("3.4305123456789"))]
+    load_rates(db_conn, rows, date(2017, 1, 2), date(2017, 1, 2), ("BRL",))
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT data_type FROM information_schema.columns WHERE table_schema ="
+            " 'raw_enrichment' AND table_name = 'fx_rates' AND column_name = 'rate'"
+        )
+        assert cur.fetchone() == ("numeric",)
+    assert fx_table(db_conn) == [(date(2017, 1, 2), "BRL", Decimal("3.4305123456789"))]

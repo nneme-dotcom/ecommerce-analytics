@@ -1,4 +1,4 @@
-"""Holidays: mocked Nager.Date v4 (shape from the official repo docs, ADR-012) + throwaway DB."""
+"""Holidays: mocked Nager.Date v3 (shape from the official README, ADR-013) + throwaway DB."""
 
 from datetime import date
 
@@ -15,24 +15,30 @@ from ingestion.enrichment.holidays import (
 from ingestion.enrichment.http import FetchError, JsonClient
 
 
-def v4_payload(country: str, year: int) -> list[dict]:
-    """Entries in the documented v4 shape (doc/examples/rest-api.md)."""
+def v3_payload(country: str, year: int) -> list[dict]:
+    """Entries in the documented v3 shape (official Nager.Date README)."""
     return [
         {
             "date": f"{year}-01-01",
+            "localName": "Año Nuevo",
             "name": "New Year's Day",
             "countryCode": country,
-            "nationalHoliday": True,
-            "subdivisionCodes": None,
-            "holidayTypes": ["Public"],
+            "fixed": True,
+            "global": True,
+            "counties": None,
+            "launchYear": None,
+            "types": ["Public"],
         },
         {
             "date": f"{year}-07-09",
+            "localName": "Feriado regional",
             "name": "Regional Day",
             "countryCode": country,
-            "nationalHoliday": False,
-            "subdivisionCodes": [f"{country}-SP", f"{country}-RJ"],
-            "holidayTypes": ["Public", "Bank"],
+            "fixed": False,
+            "global": False,
+            "counties": [f"{country}-SP", f"{country}-RJ"],
+            "launchYear": 1997,
+            "types": ["Public", "Bank"],
         },
     ]
 
@@ -44,15 +50,15 @@ class FakeNager:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.url.path)
-        _, _, _, _, country, year = request.url.path.split("/")
+        _, _, _, _, year, country = request.url.path.split("/")
         if (country, int(year)) in self.empty:
             return httpx.Response(200, json=[])
-        return httpx.Response(200, json=v4_payload(country, int(year)))
+        return httpx.Response(200, json=v3_payload(country, int(year)))
 
 
 def client_for(handler) -> JsonClient:
     return JsonClient(
-        "https://nager.test/api/v4",
+        "https://nager.test/api/v3",
         http=httpx.Client(transport=httpx.MockTransport(handler)),
         sleep=lambda s: None,
     )
@@ -68,14 +74,23 @@ def test_default_plan():
     ]
 
 
-def test_fetch_uses_v4_country_before_year():
+def test_fetch_uses_v3_year_before_country():
     fake = FakeNager()
     rows = fetch_holidays(client_for(fake), [("BR", 2017), ("AR", 2026)])
-    assert fake.paths == ["/api/v4/Holidays/BR/2017", "/api/v4/Holidays/AR/2026"]
+    assert fake.paths == ["/api/v3/PublicHolidays/2017/BR", "/api/v3/PublicHolidays/2026/AR"]
     assert len(rows) == 4
-    new_year = rows[0] if rows[0].country_code == "AR" else rows[2]
-    assert new_year.subdivision_codes == ()  # null -> empty
-    assert new_year.national_holiday is True
+    new_year = next(r for r in rows if r.country_code == "AR" and r.holiday_date.month == 1)
+    assert new_year.counties is None  # null stays null
+    assert new_year.is_global is True
+    assert new_year.local_name == "Año Nuevo"
+    assert new_year.holiday_types == ("Public",)
+    regional = next(r for r in rows if r.country_code == "BR" and r.holiday_date.month == 7)
+    assert regional.counties == ("BR-SP", "BR-RJ")
+    assert (regional.is_fixed, regional.launch_year) == (False, 1997)
+
+
+def drop(entry: dict, field: str) -> dict:
+    return {k: v for k, v in entry.items() if k != field}
 
 
 @pytest.mark.parametrize(
@@ -84,21 +99,56 @@ def test_fetch_uses_v4_country_before_year():
         (lambda p: {"not": "a list"}, "expected a JSON array"),
         (lambda p: [{**p[0], "date": "2018-01-01"}], "is not in 2017"),
         (lambda p: [{**p[0], "date": None}], "invalid date"),
+        (lambda p: [{**p[0], "date": "2017-01-01T00:00:00"}], "invalid date"),
         (lambda p: [{**p[0], "name": ""}], "missing name"),
+        (lambda p: [drop(p[0], "countryCode")], "countryCode None"),
         (lambda p: [{**p[0], "countryCode": "AR"}], "countryCode 'AR'"),
-        (lambda p: [{**p[0], "nationalHoliday": "yes"}], "not a boolean"),
-        (lambda p: [{**p[0], "holidayTypes": "Public"}], "not a list of strings"),
+        (lambda p: [drop(p[0], "global")], "global is missing or not a boolean"),
+        (lambda p: [{**p[0], "global": "yes"}], "global is missing or not a boolean"),
+        (lambda p: [drop(p[0], "types")], "types is not a list of strings"),
+        (lambda p: [{**p[0], "types": []}], "types is empty"),
+        (lambda p: [{**p[0], "types": "Public"}], "types is not a list of strings"),
+        (lambda p: [{**p[0], "counties": "BR-SP"}], "counties is not a list of strings"),
+        (lambda p: [{**p[0], "localName": 5}], "localName is not str"),
+        (lambda p: [{**p[0], "launchYear": True}], "launchYear is not int"),
+        (lambda p: [{**p[0], "fixed": "no"}], "fixed is not bool"),
         (lambda p: [], "no holidays returned"),
+        # A v4-shaped answer must not load silently.
+        (
+            lambda p: [
+                {
+                    "date": "2017-01-01",
+                    "name": "New Year's Day",
+                    "countryCode": "BR",
+                    "nationalHoliday": True,
+                    "subdivisionCodes": None,
+                    "holidayTypes": ["Public"],
+                }
+            ],
+            "global is missing",
+        ),
     ],
 )
 def test_parse_rejects_bad_payloads(mutate, message):
     with pytest.raises(FetchError, match=message):
-        parse_holidays(mutate(v4_payload("BR", 2017)), "BR", 2017)
+        parse_holidays(mutate(v3_payload("BR", 2017)), "BR", 2017)
 
 
-def test_missing_optional_fields_are_null_or_empty():
-    [h] = parse_holidays([{"date": "2017-04-21", "name": "Tiradentes"}], "BR", 2017)
-    assert (h.national_holiday, h.subdivision_codes, h.holiday_types) == (None, (), ())
+def test_optional_fields_may_be_absent():
+    [h] = parse_holidays(
+        [
+            {
+                "date": "2017-04-21",
+                "name": "Tiradentes",
+                "countryCode": "BR",
+                "global": True,
+                "types": ["Public"],
+            }
+        ],
+        "BR",
+        2017,
+    )
+    assert (h.local_name, h.counties, h.is_fixed, h.launch_year) == (None, None, None, None)
 
 
 def test_only_option_parsing():
@@ -116,8 +166,15 @@ def test_main_csv_only(tmp_path, monkeypatch):
         == 0
     )
     lines = out.read_text().splitlines()
-    assert lines[1] == "BR,2017-01-01,New Year's Day,true,,Public,Nager.Date v4"
-    assert lines[2].endswith(",false,BR-SP;BR-RJ,Public;Bank,Nager.Date v4")
+    assert lines[0] == (
+        "country_code,holiday_date,local_name,name,is_global,counties,holiday_types,"
+        "is_fixed,launch_year,source"
+    )
+    assert lines[1] == "BR,2017-01-01,Año Nuevo,New Year's Day,true,,Public,true,,Nager.Date v3"
+    assert lines[2] == (
+        "BR,2017-07-09,Feriado regional,Regional Day,false,BR-SP;BR-RJ,Public;Bank,"
+        "false,1997,Nager.Date v3"
+    )
 
 
 def test_main_empty_answer_fails_without_loading(monkeypatch, tmp_path):
@@ -136,8 +193,9 @@ def test_main_empty_answer_fails_without_loading(monkeypatch, tmp_path):
 def holiday_table(conn):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT country_code, holiday_date, name, national_holiday, subdivision_codes,"
-            " holiday_types FROM raw_enrichment.public_holidays ORDER BY 1, 2, 3"
+            "SELECT country_code, holiday_date, name, is_global, counties, holiday_types,"
+            " local_name, is_fixed, launch_year FROM raw_enrichment.public_holidays"
+            " ORDER BY 1, 2, 3"
         )
         return cur.fetchall()
 
@@ -148,13 +206,21 @@ def test_load_is_idempotent_and_scoped_to_requested_country_years(db_conn):
     load_holidays(db_conn, rows, plan)
     first = holiday_table(db_conn)
     assert len(first) == 6
-    assert first[0][4] == [] and first[1][4] == ["AR-SP", "AR-RJ"]
+    assert first[0][3:] == (True, None, ["Public"], "Año Nuevo", True, None)
+    assert first[1][3:] == (
+        False,
+        ["AR-SP", "AR-RJ"],
+        ["Public", "Bank"],
+        "Feriado regional",
+        False,
+        1997,
+    )
     load_holidays(db_conn, rows, plan)
     assert holiday_table(db_conn) == first
 
     # Reloading BR 2017 alone with a different answer leaves BR 2016 and AR 2026 untouched.
     single = [("BR", 2017)]
-    load_holidays(db_conn, parse_holidays(v4_payload("BR", 2017)[:1], "BR", 2017), single)
+    load_holidays(db_conn, parse_holidays(v3_payload("BR", 2017)[:1], "BR", 2017), single)
     after = holiday_table(db_conn)
     assert len(after) == 5
     assert [r for r in after if r[1].year != 2017] == [r for r in first if r[1].year != 2017]
@@ -170,3 +236,18 @@ def test_main_loads_into_database(database_url, db_conn, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database_url)
     assert holidays.main(["--only", "BR:2016-2018"], client=client_for(FakeNager())) == 0
     assert len(holiday_table(db_conn)) == 6
+
+
+def test_drifted_table_is_recreated(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA raw_enrichment")
+        cur.execute(
+            "CREATE TABLE raw_enrichment.public_holidays (country_code char(2), holiday_date date,"
+            " name text, national_holiday boolean, subdivision_codes text[], holiday_types text[],"
+            " source text)"
+        )
+    plan = [("BR", 2017)]
+    load_holidays(db_conn, fetch_holidays(client_for(FakeNager()), plan), plan)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT * FROM raw_enrichment.public_holidays LIMIT 0")
+        assert tuple(d.name for d in cur.description) == holidays.COLUMNS

@@ -1,7 +1,7 @@
 name: Enrichment load (manual)
 
 # Live end-to-end check of task 1.5: fetches ECB FX rates (Frankfurter v1) and public holidays
-# (Nager.Date v4) and loads them into a throwaway PostgreSQL service with the real loaders.
+# (Nager.Date v3) and loads them into a throwaway PostgreSQL service with the real loaders.
 # The agents' workspace cannot reach these APIs; GitHub runners can. Manual only, no schedule yet.
 # Both sources are public, unauthenticated data: no secrets are used. The fetched rows are
 # uploaded as an artifact (CSV) for inspection; there is no persistent warehouse yet.
@@ -68,7 +68,7 @@ jobs:
             echo '```'
             psql "$DATABASE_URL" -c "SELECT quote_currency, count(*) AS days, min(rate_date) AS first, max(rate_date) AS last FROM raw_enrichment.fx_rates GROUP BY 1 ORDER BY 1" \
               || echo "fx_rates: not loaded"
-            psql "$DATABASE_URL" -c "SELECT country_code, extract(year FROM holiday_date)::int AS year, count(*) AS entries, count(*) FILTER (WHERE 'Public' = ANY(holiday_types)) AS public FROM raw_enrichment.public_holidays GROUP BY 1, 2 ORDER BY 1, 2" \
+            psql "$DATABASE_URL" -c "SELECT country_code, extract(year FROM holiday_date)::int AS year, count(*) AS entries, count(*) FILTER (WHERE 'Public' = ANY(holiday_types)) AS public, count(*) FILTER (WHERE is_global) AS nationwide FROM raw_enrichment.public_holidays GROUP BY 1, 2 ORDER BY 1, 2" \
               || echo "public_holidays: not loaded"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

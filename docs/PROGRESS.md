@@ -20,25 +20,32 @@ Files touched:
 
 ## Log
 
-### 2026-11-03 — data-engineer — 1.5 (branch `ingestion/enrichment`, based on 1.4)
+### 2026-11-03 — data-engineer — 1.5 (PR #8, branch `ingestion/enrichment`, after review round 1)
 Done: `python -m ingestion.enrichment.fx_rates` (ECB rates EUR→BRL,USD from Frankfurter **v1**,
 2016-09-01 → today, one request per calendar year, payload + density validation, `Decimal` rates)
-and `python -m ingestion.enrichment.holidays` (Nager.Date **v4**; BR 2016–2018, AR 2026 → next year;
+and `python -m ingestion.enrichment.holidays` (Nager.Date **v3**; BR 2016–2018, AR 2026 → next year;
 `--only CC:YYYY[-YYYY]`). Both load `raw_enrichment` in one transaction (delete requested range/pairs,
 `COPY` the fetched rows, audit row in `raw_enrichment._load_audit`); `--csv-out` fetches without a DB.
 Shared `ingestion/enrichment/http.py`: sequential, 0.5 s delay, request cap, backoff on 429/5xx/network
 (numeric `Retry-After`). Manual workflow `.github/workflows/enrichment-load.yml` (workflow_dispatch
 only, no secrets): runs both against the live APIs into a Postgres service, writes row counts to
-the job summary, uploads the CSVs as an artifact. ADR-012; DATA_CONTRACT §2b.
-`db_conn` test fixture is now autocommit (loader transactions are real, not savepoints).
-Not done / open: **never run live** (APIs blocked here): the owner/orchestrator should run
-*Enrichment load (manual)* once after merge (`gh workflow run enrichment-load.yml --ref main`) and
-check: BRL/USD ≈ 2,600+ days each from 2016-09-01, ~10–20 BR/AR entries per year.
-ARS deliberately not loaded (not an ECB currency); needs its own task and source decision.
+the job summary, uploads the CSVs as an artifact. ADR-012 (FX), ADR-013 (Nager v3); DATA_CONTRACT §2b.
+Review round 1: Frankfurter snaps a non-publication start day back to the previous one (2024-01-01 →
+2023-12-29), which made every chunk after the first fail; leading dates are now dropped (debug log)
+and the fake API models the snap. Holidays moved from v4 (unverified) to v3 with strict validation
+(a v4-shaped answer fails). `InvalidOperation` → `FetchError`. `raw_enrichment` tables are re-created
+on column drift (names/order/types). PLAN 1.6 (Olist download hardening) and 1.7 (Nager v4) added.
+Rebased onto `main` after PR #7 merged. `ruff check` clean; `pytest`: 202 passed, 2 skipped
+(Olist real-data tests), with a local PostgreSQL 16.
+Not done / open: **never run live** (APIs blocked here): after merge run *Enrichment load (manual)*
+once (`gh workflow run enrichment-load.yml --ref main`) and check: BRL/USD ≈ 2,600+ days each from
+2016-09-01; roughly 10–20 BR/AR entries per year. ARS deliberately not loaded (not an ECB currency).
 No persistent warehouse exists yet, so nothing keeps these rows between runs (the artifact does).
-Gotchas for the next agent: the task text named `api.frankfurter.app` and Nager v3; both are
-superseded (ADR-012). The holidays table has no PK and keeps all holiday types: filter
-`'Public' = ANY(holiday_types)` in staging. FX has no rows on weekends/TARGET holidays.
+Gotchas for the next agent: the task text named `api.frankfurter.app`; v1 lives at
+`api.frankfurter.dev/v1` (ADR-012). Holidays: no PK, all types kept: filter
+`'Public' = ANY(holiday_types)` and use `is_global` / `counties` (null = nationwide) in staging;
+v3 is EOL 2027-01-31 (PLAN 1.7). FX has no rows on weekends/TARGET holidays.
+`db_conn` test fixture is autocommit (loader transactions are real, not savepoints).
 CLAUDE.md Commands rows for 1.5 handed to the orchestrator.
 Files touched: ingestion/enrichment/**, tests/enrichment/**, tests/conftest.py,
 .github/workflows/enrichment-load.yml, README.md, docs/DATA_CONTRACT.md, docs/DECISIONS.md,

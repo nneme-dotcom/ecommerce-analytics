@@ -4,17 +4,19 @@
     DATABASE_URL=... python -m ingestion.enrichment.holidays     # BR 2016-18, AR 2026-next year
     python -m ingestion.enrichment.holidays --only BR:2017 --csv-out h.csv    # fetch only
 
-Source assumptions (ADR-012; the API is not reachable from the agents' workspace, so they come from
-the official Nager.Date repository docs, ``doc/examples/rest-api.md``, not from a live call):
-- REST API **v4**: ``GET https://nagerholidays.com/api/v4/Holidays/{countryCode}/{year}`` returns a
-  JSON array of ``{date, name, countryCode, nationalHoliday, subdivisionCodes, holidayTypes}``.
-  v3 (``date.nager.at/api/v3/PublicHolidays/{year}/{cc}``) reaches end of life on 2027-01-31,
-  so it is not used. v4 has no ``localName`` field.
-- ``subdivisionCodes`` is null or empty for national holidays (stored as ``[]``).
+Source (ADR-013, supersedes the Nager part of ADR-012): REST API **v3**,
+``GET https://date.nager.at/api/v3/PublicHolidays/{year}/{countryCode}``, a JSON array of
+``{date, localName, name, countryCode, fixed, global, counties, launchYear, types}`` as documented
+in the official repository README. v3 reaches end of life on **2027-01-31**: migrating to v4 is
+PLAN task 1.7, once v4 is verified live. The API is not reachable from the agents' workspace.
 
-Every (country, year) must return at least one valid entry dated inside that year, otherwise the
-run fails and nothing is loaded (an empty answer never wipes good data). Load: one transaction
-deletes the requested (country, year) pairs and inserts the fetched rows, plus an audit row.
+Validation is strict, so a changed payload fails instead of loading silently: every entry needs
+``date`` (inside the requested year), ``name``, ``countryCode`` (= the requested country),
+``global`` (boolean) and ``types`` (non-empty list of strings); ``localName`` is a string or null,
+``counties`` a list of strings or null, ``fixed`` a boolean or null, ``launchYear`` an integer or
+null (absent = null). Every (country, year) must return at least one entry, otherwise the run
+fails and nothing is loaded (an empty answer never wipes good data). Load: one transaction deletes
+the requested (country, year) pairs and inserts the fetched rows, plus an audit row.
 Exit codes: 0 ok · 1 fetch/validation/load failed (nothing changed) · 2 configuration error.
 """
 
@@ -35,8 +37,20 @@ from ingestion.db import ConfigError, connect, database_url_from_env
 from ingestion.enrichment.http import FetchError, JsonClient
 from ingestion.enrichment.store import SCHEMA, ensure_schema, write_audit
 
-NAGER_V4 = "https://nagerholidays.com/api/v4"
-SOURCE = "Nager.Date v4"
+NAGER_V3 = "https://date.nager.at/api/v3"
+SOURCE = "Nager.Date v3"
+COLUMNS = (
+    "country_code",
+    "holiday_date",
+    "local_name",
+    "name",
+    "is_global",
+    "counties",
+    "holiday_types",
+    "is_fixed",
+    "launch_year",
+    "source",
+)
 
 EXIT_OK, EXIT_FAILED, EXIT_CONFIG = 0, 1, 2
 
@@ -48,9 +62,26 @@ class Holiday:
     country_code: str
     holiday_date: date
     name: str
-    national_holiday: bool | None
-    subdivision_codes: tuple[str, ...]
+    local_name: str | None
+    is_global: bool
+    counties: tuple[str, ...] | None
     holiday_types: tuple[str, ...]
+    is_fixed: bool | None
+    launch_year: int | None
+
+    def as_row(self) -> tuple:
+        return (
+            self.country_code,
+            self.holiday_date,
+            self.local_name,
+            self.name,
+            self.is_global,
+            None if self.counties is None else list(self.counties),
+            list(self.holiday_types),
+            self.is_fixed,
+            self.launch_year,
+            SOURCE,
+        )
 
 
 def default_plan(today: date) -> list[tuple[str, int]]:
@@ -58,12 +89,22 @@ def default_plan(today: date) -> list[tuple[str, int]]:
     return [("BR", y) for y in range(2016, 2019)] + [("AR", y) for y in range(2026, today.year + 2)]
 
 
-def _str_list(value: Any, field: str, where: str) -> tuple[str, ...]:
-    if value is None:
-        return ()
+def _str_list(value: Any, field: str, at: str, *, nullable: bool) -> tuple[str, ...] | None:
+    if value is None and nullable:
+        return None
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise FetchError(f"{where}: {field} is not a list of strings")
+        raise FetchError(f"{at}: {field} is not a list of strings")
     return tuple(value)
+
+
+def _optional(item: dict, field: str, kind: type, at: str) -> Any:
+    value = item.get(field)
+    if value is None:
+        return None
+    # bool is a subclass of int: never accept True/False as a year.
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise FetchError(f"{at}: {field} is not {kind.__name__} or null")
+    return value
 
 
 def parse_holidays(payload: Any, country: str, year: int) -> list[Holiday]:
@@ -75,29 +116,37 @@ def parse_holidays(payload: Any, country: str, year: int) -> list[Holiday]:
         at = f"{where} entry {i}"
         if not isinstance(item, dict):
             raise FetchError(f"{at}: not an object")
+        raw_date = item.get("date")
         try:
-            day = date.fromisoformat(str(item.get("date"))[:10])
+            if not isinstance(raw_date, str):
+                raise ValueError
+            day = date.fromisoformat(raw_date)
         except ValueError:
-            raise FetchError(f"{at}: invalid date {item.get('date')!r}") from None
+            raise FetchError(f"{at}: invalid date {raw_date!r}") from None
         if day.year != year:
             raise FetchError(f"{at}: date {day} is not in {year}")
         name = item.get("name")
         if not isinstance(name, str) or not name.strip():
             raise FetchError(f"{at}: missing name")
-        code = item.get("countryCode")
-        if code is not None and code != country:
-            raise FetchError(f"{at}: countryCode {code!r}, expected {country}")
-        national = item.get("nationalHoliday")
-        if national is not None and not isinstance(national, bool):
-            raise FetchError(f"{at}: nationalHoliday is not a boolean")
+        if item.get("countryCode") != country:
+            raise FetchError(f"{at}: countryCode {item.get('countryCode')!r}, expected {country}")
+        is_global = item.get("global")
+        if not isinstance(is_global, bool):
+            raise FetchError(f"{at}: global is missing or not a boolean")
+        types = _str_list(item.get("types"), "types", at, nullable=False)
+        if not types:
+            raise FetchError(f"{at}: types is empty")
         out.append(
             Holiday(
                 country_code=country,
                 holiday_date=day,
                 name=name,
-                national_holiday=national,
-                subdivision_codes=_str_list(item.get("subdivisionCodes"), "subdivisionCodes", at),
-                holiday_types=_str_list(item.get("holidayTypes"), "holidayTypes", at),
+                local_name=_optional(item, "localName", str, at),
+                is_global=is_global,
+                counties=_str_list(item.get("counties"), "counties", at, nullable=True),
+                holiday_types=types,
+                is_fixed=_optional(item, "fixed", bool, at),
+                launch_year=_optional(item, "launchYear", int, at),
             )
         )
     if not out:
@@ -108,7 +157,7 @@ def parse_holidays(payload: Any, country: str, year: int) -> list[Holiday]:
 def fetch_holidays(client: JsonClient, plan: list[tuple[str, int]]) -> list[Holiday]:
     rows: list[Holiday] = []
     for country, year in plan:
-        _, payload = client.get_json(f"/Holidays/{country}/{year}")
+        _, payload = client.get_json(f"/PublicHolidays/{year}/{country}")
         chunk = parse_holidays(payload, country, year)
         logger.info("holidays %s %d: %d entries", country, year, len(chunk))
         rows.extend(chunk)
@@ -125,53 +174,31 @@ def load_holidays(conn, rows: list[Holiday], plan: list[tuple[str, int]]) -> int
                 " AND holiday_date BETWEEN %s AND %s",
                 (country, date(year, 1, 1), date(year, 12, 31)),
             )
-        with cur.copy(
-            f"COPY {SCHEMA}.public_holidays (country_code, holiday_date, name, national_holiday,"
-            " subdivision_codes, holiday_types, source) FROM STDIN"
-        ) as copy:
+        with cur.copy(f"COPY {SCHEMA}.public_holidays ({', '.join(COLUMNS)}) FROM STDIN") as copy:
             for h in rows:
-                copy.write_row(
-                    (
-                        h.country_code,
-                        h.holiday_date,
-                        h.name,
-                        h.national_holiday,
-                        list(h.subdivision_codes),
-                        list(h.holiday_types),
-                        SOURCE,
-                    )
-                )
+                copy.write_row(h.as_row())
         params = {"countries_years": [f"{c}:{y}" for c, y in plan], "source": SOURCE}
         write_audit(cur, load_id, "public_holidays", len(rows), params)
     return len(rows)
 
 
 def write_csv(rows: list[Holiday], path: Path) -> None:
+    """Lists are ';'-joined; null is an empty field."""
+
+    def cell(value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return str(value).lower()
+        if isinstance(value, list):
+            return ";".join(value)
+        return value
+
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(
-            [
-                "country_code",
-                "holiday_date",
-                "name",
-                "national_holiday",
-                "subdivision_codes",
-                "holiday_types",
-                "source",
-            ]
-        )
+        writer.writerow(COLUMNS)
         for h in rows:
-            writer.writerow(
-                [
-                    h.country_code,
-                    h.holiday_date,
-                    h.name,
-                    "" if h.national_holiday is None else str(h.national_holiday).lower(),
-                    ";".join(h.subdivision_codes),
-                    ";".join(h.holiday_types),
-                    SOURCE,
-                ]
-            )
+            writer.writerow([cell(v) for v in h.as_row()])
 
 
 _ONLY = re.compile(r"^([A-Z]{2}):(\d{4})(?:-(\d{4}))?$")
@@ -199,7 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="country:years to fetch instead of the default plan (repeatable)",
     )
-    parser.add_argument("--base-url", default=NAGER_V4)
+    parser.add_argument("--base-url", default=NAGER_V3)
     parser.add_argument("--max-requests", type=int, default=40)
     parser.add_argument(
         "--csv-out", type=Path, help="also write the rows to this CSV (no DATABASE_URL needed)"

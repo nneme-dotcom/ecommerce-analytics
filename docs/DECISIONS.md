@@ -157,7 +157,7 @@ make row-count checks and transactions awkward.
 
 **Consequences.** A full real load takes about 3 s locally. The DB role used by tests needs CREATEDB.
 
-## ADR-012 — Enrichment sources: Frankfurter v1 (ECB only) and Nager.Date v4 (2026-11-03)
+## ADR-012 — Enrichment sources: Frankfurter v1 (ECB only) and Nager.Date v4 (2026-11-03; Nager.Date part superseded by ADR-013)
 
 **Context.** Task 1.5 named `api.frankfurter.app/<start>..<end>` and
 `date.nager.at/api/v3/PublicHolidays/<year>/<cc>`. Neither API is reachable from the agents'
@@ -181,3 +181,20 @@ fields (`nationalHoliday`, `subdivisionCodes`, `holidayTypes`; no `localName`).
 **Consequences.** The payload shapes are assumptions until the first workflow run; the loaders
 fail loudly (exit 1, nothing loaded) on any deviation. If v1 is ever retired, switch to
 `/v2/rates?providers=ECB` and update this ADR and DATA_CONTRACT §2b.
+
+## ADR-013 — Nager.Date v3 for now (supersedes the Nager.Date part of ADR-012) (2026-11-03)
+
+**Context.** ADR-012 picked Nager.Date v4 (`nagerholidays.com/api/v4/Holidays/{cc}/{year}`) from the
+repository's example docs. Review of PR #8 could not verify that v4 endpoint or its fields. The v3
+API is documented in the official README (`date.nager.at/api/v3/PublicHolidays/{year}/{cc}`, fields
+`date, localName, name, countryCode, fixed, global, counties, launchYear, types`) and is supported
+until 2027-01-31 (official version table).
+
+**Decision (orchestrator).** Use **v3** now. Holidays for the needed years are historical and loaded
+once, so the end-of-life date is not a blocker. Validation is strict (required `date`, `name`,
+`countryCode` = requested, `global` boolean, non-empty `types`), so any shape change fails loudly.
+Migrate to v4 before 2027-01-31 once its API is verified live (PLAN 1.7).
+
+**Consequences.** `raw_enrichment.public_holidays` columns follow v3 (`local_name`, `is_global`,
+`counties`, `holiday_types`, `is_fixed`, `launch_year`). The v4 migration will change them, with a
+contract update in the same PR. The FX part of ADR-012 still stands.

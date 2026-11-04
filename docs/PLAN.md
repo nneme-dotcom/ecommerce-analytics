@@ -21,6 +21,8 @@ Status: `todo` · `in progress` · `in review` · `done`.
 | 1.3 | Scheduled workflow running 1.2 daily + persisting rotated refresh token | devops | in review | 3 consecutive successful daily runs |
 | 1.4 | Olist download + load into PostgreSQL staging | data-engineer | in review | Row counts match source; reproducible from one command |
 | 1.5 | Enrichment: FX rates (ECB) and holidays (Nager.Date) | data-engineer | in review | Loaded to staging with tests |
+| 1.6 | Olist download hardening (PR #7 low findings) | data-engineer | todo | Hash bytes while streaming the `COPY` instead of a second read (load.py:106,166); byte cap on the HTTP download (download.py:93-95); map `RuntimeError`/`NotImplementedError` from `zipfile` (encrypted/unsupported members) to `DownloadError` (download.py:151); `cleanup_stale` deletes only files the tool created (download.py:175-182); note/resolve config exit code 2 (Olist, enrichment) vs 5 (ML snapshot) |
+| 1.7 | Migrate holidays to Nager.Date v4 (before v3 EOL 2027-01-31) | data-engineer | todo | v4 endpoint and fields verified by a live run; loader, DATA_CONTRACT §2b and ADR updated in one PR |
 
 ## Phase 2 — Model and metrics
 

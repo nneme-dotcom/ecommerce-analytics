@@ -12,9 +12,12 @@ so they come from Frankfurter's source code and changelog, not from a live call)
 - ``GET /v1/<start>..<end>?from=EUR&to=BRL,USD`` →
   ``{"amount": 1.0, "base": "EUR", "start_date", "end_date", "rates": {"YYYY-MM-DD": {"BRL": r}}}``,
   one key per ECB publication day (no weekends/TARGET holidays). 404 = no data in the range.
+  If ``<start>`` is not a publication day, the answer **starts on the previous publication day**
+  (e.g. a request from 2024-01-01 returns 2023-12-29 first). Such leading dates are dropped (the
+  previous chunk covers them); a date after ``<end>`` is still an error.
 - **ARS is not an ECB reference currency**, so it is refused here (left for a later task).
 
-The range is fetched one calendar year per request. Every chunk is validated (base, dates inside
+The range is fetched one calendar year per request. Every chunk is validated (base, no date after
 the range, positive rates, only requested currencies, every currency present) and must be dense
 (≥ 80 % of weekdays), so a downsampled or truncated series fails instead of loading silently.
 Load: one transaction deletes the requested (date range × currencies) and inserts the fetched
@@ -31,7 +34,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -80,16 +83,26 @@ def parse_rates(payload: Any, start: date, end: date, quotes: tuple[str, ...]) -
         raise FetchError("unexpected payload: no 'rates' object")
     if payload.get("base") != BASE_CURRENCY:
         raise FetchError(f"unexpected base {payload.get('base')!r}, expected {BASE_CURRENCY}")
-    if "amount" in payload and Decimal(str(payload["amount"])) != 1:
-        raise FetchError(f"unexpected amount {payload['amount']!r}")
+    if "amount" in payload:
+        try:
+            amount_ok = Decimal(str(payload["amount"])) == 1
+        except InvalidOperation:
+            amount_ok = False
+        if not amount_ok:
+            raise FetchError(f"unexpected amount {payload['amount']!r}")
     out: list[FxRate] = []
+    dropped: list[date] = []
     for day, rates in payload["rates"].items():
         try:
             rate_date = date.fromisoformat(day)
         except (TypeError, ValueError):
             raise FetchError(f"unexpected date key {day!r}") from None
-        if not start <= rate_date <= end:
-            raise FetchError(f"date {day} outside the requested range {start}..{end}")
+        if rate_date > end:
+            raise FetchError(f"date {day} after the requested range {start}..{end}")
+        if rate_date < start:
+            # Frankfurter snaps the start back to the previous publication day.
+            dropped.append(rate_date)
+            continue
         if not isinstance(rates, dict):
             raise FetchError(f"{day}: rates is not an object")
         for quote, value in rates.items():
@@ -97,10 +110,22 @@ def parse_rates(payload: Any, start: date, end: date, quotes: tuple[str, ...]) -
                 raise FetchError(f"{day}: unrequested currency {quote!r}")
             if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
                 raise FetchError(f"{day} {quote}: rate is not a number")
-            rate = Decimal(value)
-            if not rate > 0:
-                raise FetchError(f"{day} {quote}: rate {rate} is not positive")
+            try:
+                rate = Decimal(value)
+                positive = rate.is_finite() and rate > 0
+            except InvalidOperation:
+                positive = False
+            if not positive:
+                raise FetchError(f"{day} {quote}: rate {value!r} is not a positive number")
             out.append(FxRate(rate_date, BASE_CURRENCY, quote, rate))
+    if dropped:
+        logger.debug(
+            "%s..%s: dropped %d date(s) before the start: %s",
+            start,
+            end,
+            len(dropped),
+            ", ".join(d.isoformat() for d in sorted(dropped)),
+        )
     if out:
         missing = set(quotes) - {r.quote_currency for r in out}
         if missing:

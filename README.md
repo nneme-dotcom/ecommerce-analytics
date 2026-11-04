@@ -41,9 +41,10 @@ are recorded in [docs/DECISIONS.md](docs/DECISIONS.md).
 - [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
   by Olist, on Kaggle, licensed [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
   (per the Kaggle page). The CSVs are not redistributed here; `python -m ingestion.olist.download`
-  fetches them. Analyses derived from it are shared under the same license terms, non-commercially.
+  fetches them. Changes: raw tables are loaded unchanged; staging and marts are transformations of
+  them. Analyses derived from it are shared under the same license terms, non-commercially.
 - FX rates: [European Central Bank](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html)
   euro reference rates, via the [Frankfurter](https://frankfurter.dev) API.
-  Public holidays: [Nager.Date](https://nagerholidays.com).
+  Public holidays: [Nager.Date](https://date.nager.at).
 - Mercado Libre data is obtained through the official API with an authorized application.
   Raw API data is not redistributed in this repository; only code and aggregated analyses are published.

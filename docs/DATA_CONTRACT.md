@@ -236,30 +236,42 @@ USD→BRL etc. are derived in `staging` (cross rate = BRL/USD on the same date).
 `--quotes ARS`. ARS (needed to convert Mercado Libre prices) is left for a later task; a candidate
 source is BCRA (Frankfurter v2 exposes it as provider `BCRA`), not decided.
 Load rule: one transaction deletes the requested date range × currencies and inserts the fetched
-rows (idempotent; picks up revisions). A chunk (one calendar year per request) must be dense
+rows (idempotent; picks up revisions). Frankfurter snaps a range start that is not a publication
+day back to the previous one (a request from 2024-01-01 starts on 2023-12-29). Such leading dates
+are dropped, because the previous yearly chunk already covers them; a date after the range end is
+an error. A chunk (one calendar year per request) must be dense
 (≥ 80 % of weekdays have a rate) or the run fails; an empty answer never deletes data.
 
 ### `raw_enrichment.public_holidays` (`python -m ingestion.enrichment.holidays`)
 
-One row per holiday entry as returned by Nager.Date **v4**
-(`https://nagerholidays.com/api/v4/Holidays/{countryCode}/{year}`). All holiday types are kept
-(`Public`, `Bank`, `School`, `Authorities`, `Optional`, `Observance`); filter in `staging`.
+One row per holiday entry as returned by Nager.Date **v3**
+(`https://date.nager.at/api/v3/PublicHolidays/{year}/{countryCode}`; ADR-013. v3 is end-of-life
+on 2027-01-31, and migrating to v4 is PLAN 1.7). All holiday types are kept (`Public`, `Bank`,
+`School`, `Authorities`, `Optional`, `Observance`); filter in `staging`.
 
-| column | type | source field |
-|--------|------|--------------|
-| country_code | char(2) | request param (`countryCode` must match) |
-| holiday_date | date | `date` |
-| name | text | `name` (English; v4 has no local name) |
-| national_holiday | boolean? | `nationalHoliday` |
-| subdivision_codes | text[] | `subdivisionCodes`, ISO 3166-2 (e.g. `BR-SP`); null → `{}` |
-| holiday_types | text[] | `holidayTypes`; null → `{}` |
-| source | text | `Nager.Date v4` |
+| column | type | source field | rule |
+|--------|------|--------------|------|
+| country_code | char(2) | `countryCode` | required, must equal the requested country |
+| holiday_date | date | `date` | required, `YYYY-MM-DD` inside the requested year |
+| local_name | text? | `localName` | string or null |
+| name | text | `name` | required (English name) |
+| is_global | boolean | `global` | required; `true` = nationwide |
+| counties | text[]? | `counties` | ISO 3166-2 codes (e.g. `BR-SP`) or null (nationwide) |
+| holiday_types | text[] | `types` | required, non-empty |
+| is_fixed | boolean? | `fixed` | boolean or null/absent |
+| launch_year | int? | `launchYear` | integer or null |
+| source | text | — | `Nager.Date v3` |
 
-No primary key (raw as returned; the same date may appear for different subdivisions or types).
+No primary key: rows are raw as returned, and the same date may appear for different counties or
+types. Any entry breaking a rule fails the whole run with nothing loaded, so a changed payload
+(e.g. the v4 field names) cannot load silently.
 Default coverage: **BR 2016–2018** (Olist years) and **AR 2026 → next year** (Mercado Libre years);
 override with `--only CC:YYYY[-YYYY]`. Load rule: one transaction deletes the requested
-(country, year) pairs and inserts the fetched rows; a (country, year) answering with no entries
+(country, year) pairs and inserts the fetched rows. A (country, year) that answers with no entries
 fails the run and nothing changes.
+
+Tables in `raw_enrichment` are re-created inside the load transaction if their columns (names,
+order or types) drift from this contract (no `CASCADE`).
 
 ### `raw_enrichment._load_audit` (append-only)
 
