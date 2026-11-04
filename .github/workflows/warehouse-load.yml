@@ -1,0 +1,206 @@
+name: Warehouse load
+
+# Loads the raw sources into the Neon warehouse and runs `dbt build` there (PLAN 2.6, ADR-014,
+# ADR-017). Raw schemas belong to the Python loaders; dbt only reads them (DATA_CONTRACT §3).
+#
+# Triggers (ADR-017):
+# - after every successful "ML daily snapshot" run (workflow_run; GitHub runs THIS file from the
+#   default branch, never from a PR or another branch), in mode `daily`;
+# - manual dispatch on main, mode `daily` or `full`.
+# Modes:
+# - daily: raw_mercadolibre (unchanged days are skipped by hash, ADR-015); raw_olist only if the
+#   archive's CSVs differ from the last load (or it was never loaded); raw_enrichment only if it was
+#   never loaded. Then dbt build.
+# - full: all three raw schemas (Olist from olist/archive.zip in the data repo, both enrichment
+#   loaders against the public APIs), then dbt build.
+#
+# Secrets: WAREHOUSE_DATABASE_URL lives in the Environment `warehouse` (main only). Loader steps get
+# it as DATABASE_URL; dbt gets the parts split and masked by scripts/warehouse_env.py via
+# $GITHUB_ENV (never job outputs, never shell parsing, no `set -x`). DATA_REPO_PAT (repo-level,
+# ADR-010/ADR-014) reads the private data repo; it reaches git only as an env-only http.extraheader
+# in the fetch step (never in a URL, argv or .git/config), as in ADR-009.
+
+on:
+  workflow_run:
+    workflows: ["ML daily snapshot"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "daily = ML (+ Olist/enrichment only if changed or never loaded); full = every raw schema"
+        type: choice
+        options: [daily, full]
+        default: daily
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash  # bash -eo pipefail
+
+jobs:
+  load:
+    name: Load raw sources and dbt build
+    # Main only: the Environment is restricted to main as well (the control), this guard keeps
+    # other refs from even requesting it. workflow_run: only after a successful snapshot run of
+    # main in this repository.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    environment: warehouse
+    timeout-minutes: 60
+    # One load at a time (two runs would race on the same raw tables and on dbt's relations). A
+    # running job is never cancelled; GitHub keeps one PENDING job per group and cancels an older
+    # pending one, which is harmless here because every run loads the full current state.
+    concurrency:
+      group: warehouse-load-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      DATA_REPO: nneme-dotcom/ecommerce-analytics-data
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'daily' }}
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+
+      - name: Check the mode
+        timeout-minutes: 1
+        run: |
+          case "$MODE" in
+            daily|full) echo "Mode: ${MODE} (event: ${GITHUB_EVENT_NAME})" ;;
+            *) echo "::error title=Bad mode::mode must be daily or full"; exit 2 ;;
+          esac
+
+      # Shallow fetch of the data repo's main into data/ (git-ignored here). The PAT is base64'd by a
+      # bash builtin (not a process argv), masked, and handed to git through GIT_CONFIG_* env only.
+      - name: Fetch the data repo into data/
+        timeout-minutes: 10
+        env:
+          DATA_REPO_PAT: ${{ secrets.DATA_REPO_PAT }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          if [ -z "$DATA_REPO_PAT" ]; then
+            echo "::error title=DATA_REPO_PAT missing::the repository secret DATA_REPO_PAT is not set"
+            exit 2
+          fi
+          auth="$(printf 'x-access-token:%s' "$DATA_REPO_PAT" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
+          git init --quiet data
+          git -C data remote add origin "https://github.com/${DATA_REPO}.git"
+          git -C data fetch --quiet --depth=1 --no-tags origin main
+          git -C data checkout --quiet --detach FETCH_HEAD
+          shopt -s nullglob
+          days=(data/mercadolibre/snapshot_date=*/)
+          echo "Data repo at $(git -C data rev-parse --short HEAD): ${#days[@]} ML day folder(s)."
+
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dbt.txt
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: pip install -r requirements.txt -r requirements-dbt.txt
+
+      # Masks every URL part, then writes the DBT_PG_* variables to $GITHUB_ENV (ADR-014).
+      - name: Split the warehouse URL for dbt (masked)
+        timeout-minutes: 2
+        env:
+          WAREHOUSE_DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+        run: python scripts/warehouse_env.py
+
+      - name: Load raw_mercadolibre
+        id: ml
+        timeout-minutes: 15
+        env:
+          DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+        run: python -m ingestion.mercadolibre.load --source data
+
+      - name: Decide the Olist and enrichment loads
+        id: plan
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+        run: python -m scripts.warehouse_report plan --mode "$MODE" --olist-zip data/olist/archive.zip
+
+      - name: Load raw_olist (from olist/archive.zip)
+        id: olist
+        if: steps.plan.outputs.olist == 'true'
+        timeout-minutes: 20
+        env:
+          DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+        run: |
+          zip="data/olist/archive.zip"
+          if [ ! -f "$zip" ]; then
+            echo "::error title=Olist archive missing::olist/archive.zip is not in the data repo"
+            exit 1
+          fi
+          # A Git LFS pointer instead of the archive would only fail later as "not a zip".
+          if [ "$(head -c 23 "$zip" | tr -d '\0')" = "version https://git-lfs" ]; then
+            echo "::error title=Olist archive is an LFS pointer::store olist/archive.zip as a regular git file"
+            exit 1
+          fi
+          echo "olist/archive.zip: $(stat -c %s "$zip") bytes, sha256 $(sha256sum "$zip" | cut -d' ' -f1)"
+          python -m ingestion.olist.download --from-zip "$zip" --dest "$RUNNER_TEMP/olist"
+          python -m ingestion.olist.load --source "$RUNNER_TEMP/olist"
+
+      - name: Load raw_enrichment.fx_rates (Frankfurter v1)
+        id: fx
+        if: steps.plan.outputs.enrichment == 'true'
+        timeout-minutes: 10
+        env:
+          DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+        run: python -m ingestion.enrichment.fx_rates
+
+      - name: Load raw_enrichment.public_holidays (Nager.Date v3)
+        id: holidays
+        if: steps.plan.outputs.enrichment == 'true'
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+        run: python -m ingestion.enrichment.holidays
+
+      # dbt-postgres has no channel_binding profile field; libpq (bundled with psycopg2) reads
+      # PGCHANNELBINDING. Set here only, always to a valid keyword (ADR-017).
+      - name: dbt build
+        id: dbt
+        timeout-minutes: 20
+        run: |
+          export PGCHANNELBINDING="$DBT_PG_CHANNEL_BINDING"
+          dbt build --project-dir warehouse --profiles-dir warehouse
+
+      - name: Job summary (counts and sizes only)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.WAREHOUSE_DATABASE_URL }}
+          OUT_ML: ${{ steps.ml.outcome }}
+          OUT_PLAN: ${{ steps.plan.outcome }}
+          OUT_OLIST: ${{ steps.olist.outcome }}
+          OUT_FX: ${{ steps.fx.outcome }}
+          OUT_HOLIDAYS: ${{ steps.holidays.outcome }}
+          OUT_DBT: ${{ steps.dbt.outcome }}
+        run: |
+          args=(--mode "$MODE" --run-results warehouse/target/run_results.json
+                --step "raw_mercadolibre=${OUT_ML}" --step "plan=${OUT_PLAN}" --step "raw_olist=${OUT_OLIST}"
+                --step "fx_rates=${OUT_FX}" --step "public_holidays=${OUT_HOLIDAYS}"
+                --step "dbt build=${OUT_DBT}")
+          if [ "$OUT_OLIST" = "success" ]; then
+            args+=(--olist-manifest "$RUNNER_TEMP/olist/manifest.json")
+          fi
+          python -m scripts.warehouse_report summary "${args[@]}"

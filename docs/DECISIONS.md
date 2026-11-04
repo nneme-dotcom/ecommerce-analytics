@@ -327,3 +327,72 @@ have the loaders' DDL (`raw_enrichment` is typed, with a PK and a CHECK).
 the dbt job, which is wanted. Models get fixture coverage only for cases written into
 `warehouse/fixtures/`, which each modelling task extends. Task 2.6 maps the split
 `WAREHOUSE_DATABASE_URL` onto the six profile variables.
+
+## ADR-017 — Warehouse load workflow: chained after the snapshot, change-driven Olist/enrichment loads, URL split (2026-11-04)
+
+**Context.** Task 2.6 loads the raw sources into Neon and runs `dbt build` there
+(`.github/workflows/warehouse-load.yml`). The warehouse must stay current with the daily ML snapshot,
+while Neon's free plan (ADR-014: 1 GB, 100 CU-hours a month) rules out rewriting 1.55 M Olist rows
+every day. The 05:23 UTC schedule of the snapshot did not fire on its first day (PROGRESS
+2026-11-04), so a second, independent cron would add a second chance to miss a day and a guess
+about how long the snapshot takes.
+
+**Decision.**
+- **Triggers.** `workflow_run` on *ML daily snapshot* (`types: [completed]`, `branches: [main]`), and
+  the job runs only if that run's `conclusion == 'success'`, its `head_branch` is `main` and its head
+  repository is this one; plus `workflow_dispatch` with `mode: daily | full`. GitHub runs the
+  `workflow_run` workflow from the **default branch** file, so branch code never gets the warehouse
+  secret; the job's `if: github.ref == 'refs/heads/main'` and the Environment `warehouse` (main
+  only) keep a dispatch from another ref out. A failed snapshot (exit 1–5) starts no load: there
+  is nothing new, and the next successful run loads every day folder anyway (ADR-015 skips
+  unchanged days), so the warehouse catches up by itself. No extra schedule.
+- **Modes.** `daily` (the chained runs) always loads `raw_mercadolibre`, then `dbt build`. It also
+  loads `raw_olist` **only when its input changed**: `scripts/warehouse_report.py plan` streams the
+  nine CSVs out of `olist/archive.zip` (SHA-256, nothing extracted) and compares them with the latest
+  `raw_olist._load_audit.file_sha256` per table; a difference, a missing table or no audit means
+  load. `raw_enrichment` loads in `daily` only when it was never loaded (no table or no audit row
+  for `fx_rates` / `public_holidays`): its useful ranges are historical (FX for Olist 2016–2018,
+  holidays per fixed year), so it is refreshed on demand with `full` (e.g. in January, for the next
+  AR holiday year). `full` loads all three raw schemas, then `dbt build`. So the first chained run
+  after merge bootstraps an empty warehouse even if nobody dispatches `full`.
+- **Olist archive.** Read from the data repo at `olist/archive.zip` with `ingestion.olist.download
+  --from-zip` into `$RUNNER_TEMP`, then `ingestion.olist.load`. The archive's size and SHA-256 are
+  logged and its `manifest.json` `archive_sha256` goes into the job summary; the per-CSV hashes are
+  in `raw_olist._load_audit` (no schema change). A Git LFS pointer is refused with a clear error.
+- **Data repo fetch.** Not `actions/checkout@v5`: it writes the token into `.git/config` for the
+  duration of the fetch even with `persist-credentials: false`. The step runs `git init` + `git
+  fetch --depth=1` of `main` with the PAT as an env-only `http.extraheader` (`GIT_CONFIG_COUNT`/
+  `KEY_0`/`VALUE_0`, base64 built by a bash builtin, masked), the pattern of ADR-009's push step.
+  The remote URL carries no credential.
+- **URL split.** `scripts/warehouse_env.py` (stdlib) parses `WAREHOUSE_DATABASE_URL` and prints
+  `::add-mask::` for user, password (percent-encoded and decoded), host (as written and lower-cased),
+  the host's first label (the Neon endpoint id, if 6+ characters and not numeric) and the database
+  name, **before** writing `DBT_PG_HOST/PORT/USER/DBNAME/SSLMODE`, `DBT_ENV_SECRET_PG_PASSWORD` and
+  `DBT_PG_CHANNEL_BINDING` to `$GITHUB_ENV` (heredoc blocks with random delimiters). Values with
+  `%` are masked both escaped (`%25`, as the runner unescapes command data) and raw. It refuses
+  (exit 2, no value in the message): a missing part, control characters, multi-host URLs, an
+  `sslmode` other than `require` (verify-* would need a root certificate the profile does not
+  pass), and any query parameter besides `sslmode` / `channel_binding`, so dbt can never connect
+  differently from the loaders. Loader steps receive the secret itself as `DATABASE_URL`.
+- **channel_binding.** dbt-postgres 1.11 has no profile field for it, and dbt connects through
+  psycopg2, whose wheel (2.9.13) bundles libpq 17. libpq reads `PGCHANNELBINDING` for any option the
+  caller leaves unset, so the dbt step (only) exports `PGCHANNELBINDING="$DBT_PG_CHANNEL_BINDING"`.
+  The script writes the URL's value, or `prefer` (libpq's default) when absent: an *empty*
+  `PGCHANNELBINDING` is a fatal "invalid channel_binding value". Verified locally on PostgreSQL 16
+  with TLS + SCRAM: `require` builds green, `require` without TLS and the empty value fail. It is
+  not a profile-wide `PG*` variable, so ADR-016's concern (redirecting the loaders) does not apply;
+  the loaders get `channel_binding` from the URL.
+- **Run shape.** Job-level `concurrency` `warehouse-load-<ref>`, `cancel-in-progress: false`
+  (ADR-009 semantics; a pending run displaced by a newer one is harmless because every run loads
+  the full current state). Job timeout 60 min, every step has its own. Any failing step fails the
+  job; dbt runs only if every load succeeded (each load is one transaction, so a failed load
+  leaves the previous state). The summary step (`!cancelled()`) lists step outcomes, row counts
+  per raw table, ML days loaded, dbt result counts by resource type and status (plus failing node
+  ids), `pg_database_size` and size per schema, with a warning at 80 % of 1 GB. No host, database
+  name, URL or row content.
+
+**Consequences.** The warehouse trails the snapshot by one workflow start. Replacing the archive in
+the data repo is picked up by the next daily run without a dispatch. FX after 2018 and the next
+AR holiday year need a `full` run. If the snapshot workflow is renamed, the `workflows:` filter
+must follow (it matches the `name:`). A pending `full` dispatch can be displaced by a chained
+`daily` run queued behind the same running job; re-dispatch it.
