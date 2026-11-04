@@ -207,19 +207,35 @@ Phase 2.4 API can read from. The owner reviewed Phase 1 and approved it, with ta
 alongside Phase 2.
 
 **Decision (owner).**
-- **Neon free plan** (managed PostgreSQL), one project in an EU region. Limits checked on 2026-11-04
-  (neon.com/docs/introduction/free-tier): 1 GB storage per project, 100 CU-hours per month, compute
-  suspends after 5 min idle. Our raw data is well under 1 GB (Olist ≈ 1.55 M text rows; ML ≈ 2.5 k
-  offers per day).
-- The connection string is the Actions secret **`WAREHOUSE_DATABASE_URL`**, created by the owner in the
-  GitHub UI. It is never pasted in chat, committed, or logged (`ingestion/db.py` already never logs
-  the URL).
-- **dbt** (`dbt-core` + `dbt-postgres`, pinned) for staging → star schema → marts, in `warehouse/`.
-  Models carry dbt tests (unique, not_null, relationships, accepted values) and docs. CI runs
-  `dbt build` against a throwaway PostgreSQL with small fixtures, never against Neon.
-- Raw schemas stay owned by the Python loaders (`raw_olist`, `raw_enrichment`, and a new
-  `raw_mercadolibre`); dbt only reads them (as sources) and writes its own schemas.
+- **Neon free plan** (managed PostgreSQL 16), one project in an EU region. Limits checked on
+  2026-11-04 (neon.com/docs/introduction/free-tier): 1 GB storage per project, 100 CU-hours per month,
+  compute suspends after 5 min idle.
+- **The data repo stays the system of record** (ADR-003 is not reopened): every raw schema in Neon
+  (`raw_olist`, `raw_enrichment`, `raw_mercadolibre`) can be dropped and rebuilt from the data repo and
+  the public APIs. Raw schemas are owned by the Python loaders; dbt reads them as sources only.
+- **dbt** (`dbt-core` + `dbt-postgres`, pinned in `requirements-dbt.txt`, separate from the runtime
+  `requirements.txt`) builds exactly three schemas: `staging` (views), `core` (star schema, tables) and
+  `marts` (tables); `generate_schema_name` is overridden so dbt never prefixes them. `dbt-postgres`
+  brings `psycopg2`; it is used only by dbt (loaders keep psycopg 3, ADR-011). CI runs `dbt build`
+  against a throwaway PostgreSQL with small fixtures and **receives no secrets**.
+- **Secrets used by the warehouse workflow:**
+  - `WAREHOUSE_DATABASE_URL` (direct, non-pooled Neon connection string, `sslmode=require`), stored in
+    a GitHub **Environment `warehouse` restricted to `main`**, created by the owner in the GitHub UI.
+    Loader steps receive it as `DATABASE_URL`. dbt takes separate profile fields, so the URL is split
+    by a Python step that first emits `::add-mask::` for every derived part (password, user, host);
+    no shell parsing, no `set -x`.
+  - `DATA_REPO_PAT` (existing, repo-level) to read the ML snapshots and the Olist archive from the data
+    repo. Owner decision: reuse it instead of a new read-only PAT; this extends the ADR-010 accepted
+    risk to a second workflow.
+- **Olist source:** the owner pushes the Kaggle `archive.zip` once to the private data repo (not
+  redistributed; CC BY-NC-SA); the workflow reads it with `--from-zip`.
+- **Exposure:** only `marts` (aggregates) are served by the 2.4 API, through a separate read-only
+  database role, never the loader credential. Offer-level rows (`core.fact_offer_snapshot`) are not
+  exposed, so raw ML data is not republished (ADR-003).
 
-**Consequences.** One more account (owner) and secret. Free-plan compute suspends when idle, so the
-first query after a pause is slower; acceptable for a portfolio. If limits are hit, the dbt project
-runs unchanged on any PostgreSQL. Phase 4 (AWS) may move the warehouse; the layout does not change.
+**Consequences.** One more account and one Environment secret (owner). Storage estimate: raw ≈ 0.3 GB
+(Olist text tables incl. 1 M geolocation rows), `core`/`marts` add roughly as much again; ML grows by
+≈ 2.3 k offers per day (≈ 0.85 M rows per year). Staging as views and a `pg_database_size` line in the
+workflow summary keep this visible. 100 CU-hours a month cannot keep a compute awake all month, so the
+API must tolerate cold starts and must not keep Neon awake. If limits are hit, the dbt project runs
+unchanged on any PostgreSQL; Phase 4 (AWS) may move the warehouse without changing the layout.

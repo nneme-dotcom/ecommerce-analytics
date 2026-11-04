@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.0 dbt skeleton and 2.5 ML raw loader; owner creates the Neon project and the `WAREHOUSE_DATABASE_URL` secret (ADR-014) before 2.6. Keep watching the daily ML runs for 1.3.
+- **Next up:** 2.0 dbt skeleton and 2.5 ML raw loader; before 2.6 the owner creates the Neon project, the Environment `warehouse` (main only) with `WAREHOUSE_DATABASE_URL`, and pushes `archive.zip` to the data repo (ADR-014). Keep watching the daily ML runs for 1.3.
 - **Blockers:** none.
 
 ## Handoff template
@@ -24,7 +24,11 @@ Files touched:
 Done: owner approved Phase 1 (1.3 stays open until 3 consecutive scheduled successes; 1.6/1.8
 alongside Phase 2). Owner chose Neon (managed Postgres) for the warehouse and dbt for transformations:
 ADR-014. PLAN gains 2.0 (dbt skeleton + CI), 2.5 (ML snapshot raw loader) and 2.6 (Neon load workflow).
-Not done / open: Neon project and `WAREHOUSE_DATABASE_URL` secret (owner). The 2026-11-04 05:23 UTC
+Review round 1 (PR #10): owner chose an Environment `warehouse` (main only) for the Neon secret,
+reuse of `DATA_REPO_PAT` to read the data repo (extends ADR-010), and the Olist zip in the data repo.
+ADR-014 now pins schema names, secret handling (mask every URL part), storage/CU estimates, API
+exposure (marts only, read-only role) and the data repo as system of record.
+Not done / open: Neon project, Environment `warehouse` + `WAREHOUSE_DATABASE_URL`, `archive.zip` in the data repo (owner). The 2026-11-04 05:23 UTC
 scheduled snapshot did not fire; owner chose to wait for the next one.
 Gotchas for the next agent: never run dbt or loaders against Neon from the workspace (it has no
 secret and no route); develop against a throwaway Postgres. dbt reads raw schemas as sources only.
