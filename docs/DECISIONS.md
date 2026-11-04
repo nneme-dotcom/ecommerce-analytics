@@ -132,7 +132,8 @@ GitHub Environment. The owner is the only contributor.
 
 **Consequences.** If the PAT leaked, it could also push to the public repo. Revisit before
 adding collaborators or making the project a team effort: split into two PATs (or a GitHub App)
-and move the secrets into an Environment restricted to `main`. Supersedes ADR-003's
+and move the secrets into an Environment restricted to `main` (done for the warehouse secret only, ADR-014,
+which also reuses `DATA_REPO_PAT` in a second workflow). Supersedes ADR-003's
 "PAT scoped to that repo only" wording.
 
 ## ADR-011 — psycopg 3 for PostgreSQL loads; raw Olist as one-transaction COPY (2026-11-03)
@@ -208,7 +209,7 @@ alongside Phase 2.
 
 **Decision (owner).**
 - **Neon free plan** (managed PostgreSQL 16), one project in an EU region. Limits checked on
-  2026-11-04 (neon.com/docs/introduction/free-tier): 1 GB storage per project, 100 CU-hours per month,
+  2026-11-04 (neon.com/docs/introduction/free-tier, page updated 2026-10-23; re-confirmed during review): 1 GB storage per project, 100 CU-hours per month,
   compute suspends after 5 min idle.
 - **The data repo stays the system of record** (ADR-003 is not reopened): every raw schema in Neon
   (`raw_olist`, `raw_enrichment`, `raw_mercadolibre`) can be dropped and rebuilt from the data repo and
@@ -223,7 +224,8 @@ alongside Phase 2.
     a GitHub **Environment `warehouse` restricted to `main`**, created by the owner in the GitHub UI.
     Loader steps receive it as `DATABASE_URL`. dbt takes separate profile fields, so the URL is split
     by a Python step that first emits `::add-mask::` for every derived part (password, user, host);
-    no shell parsing, no `set -x`.
+    no shell parsing, no `set -x`. Both the percent-encoded and the decoded password are masked, and the
+    parts stay inside one job (`GITHUB_ENV`, never job outputs).
   - `DATA_REPO_PAT` (existing, repo-level) to read the ML snapshots and the Olist archive from the data
     repo. Owner decision: reuse it instead of a new read-only PAT; this extends the ADR-010 accepted
     risk to a second workflow.
