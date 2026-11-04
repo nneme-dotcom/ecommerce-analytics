@@ -251,3 +251,26 @@ def test_drifted_table_is_recreated(db_conn):
     with db_conn.cursor() as cur:
         cur.execute("SELECT * FROM raw_enrichment.public_holidays LIMIT 0")
         assert tuple(d.name for d in cur.description) == holidays.COLUMNS
+
+
+def test_holiday_load_leaves_drifted_fx_rates_and_audit_alone(database_url, db_conn, monkeypatch):
+    with db_conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA raw_enrichment")
+        cur.execute("CREATE TABLE raw_enrichment.fx_rates (rate_date date, rate double precision)")
+        cur.execute("INSERT INTO raw_enrichment.fx_rates VALUES ('2017-01-02', 3.4)")
+    plan = [("BR", 2017)]
+    load_holidays(db_conn, fetch_holidays(client_for(FakeNager()), plan), plan)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT * FROM raw_enrichment.fx_rates")
+        assert cur.fetchall() == [(date(2017, 1, 2), 3.4)]
+        # Now drift the audit table: the holiday loader exits 1 and keeps the history.
+        cur.execute("ALTER TABLE raw_enrichment._load_audit ADD COLUMN extra text")
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    assert holidays.main(["--only", "BR:2018"], client=client_for(FakeNager())) == 1
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT table_name FROM raw_enrichment._load_audit")
+        assert cur.fetchall() == [("public_holidays",)]
+        cur.execute(
+            "SELECT count(*) FROM raw_enrichment.public_holidays WHERE holiday_date >= '2018-01-01'"
+        )
+        assert cur.fetchone() == (0,)

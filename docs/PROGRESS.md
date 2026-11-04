@@ -37,6 +37,11 @@ and the fake API models the snap. Holidays moved from v4 (unverified) to v3 with
 on column drift (names/order/types). PLAN 1.6 (Olist download hardening) and 1.7 (Nager v4) added.
 Rebased onto `main` after PR #7 merged. `ruff check` clean; `pytest`: 202 passed, 2 skipped
 (Olist real-data tests), with a local PostgreSQL 16.
+Review round 2: `store.ensure_schema(cur, target)` re-creates only the loader's own table on drift;
+other missing tables are created, other drifted data tables are left alone (warning), and a drifted
+`_load_audit` raises `SchemaDriftError` (exit 1, rollback, history kept; never dropped). FX density is
+checked per `quote_currency`; a date more than 7 days before a chunk start is a `FetchError`
+(DATA_CONTRACT §2b updated). `ruff check` clean; `pytest`: 207 passed, 2 skipped (PostgreSQL 16).
 Not done / open: **never run live** (APIs blocked here): after merge run *Enrichment load (manual)*
 once (`gh workflow run enrichment-load.yml --ref main`) and check: BRL/USD ≈ 2,600+ days each from
 2016-09-01; roughly 10–20 BR/AR entries per year. ARS deliberately not loaded (not an ECB currency).

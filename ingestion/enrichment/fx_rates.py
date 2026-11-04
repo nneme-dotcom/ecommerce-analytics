@@ -14,12 +14,14 @@ so they come from Frankfurter's source code and changelog, not from a live call)
   one key per ECB publication day (no weekends/TARGET holidays). 404 = no data in the range.
   If ``<start>`` is not a publication day, the answer **starts on the previous publication day**
   (e.g. a request from 2024-01-01 returns 2023-12-29 first). Such leading dates are dropped (the
-  previous chunk covers them); a date after ``<end>`` is still an error.
+  previous chunk covers them) if at most 7 calendar days before ``<start>``; an older date, or a
+  date after ``<end>``, is an error.
 - **ARS is not an ECB reference currency**, so it is refused here (left for a later task).
 
 The range is fetched one calendar year per request. Every chunk is validated (base, no date after
 the range, positive rates, only requested currencies, every currency present) and must be dense
-(≥ 80 % of weekdays), so a downsampled or truncated series fails instead of loading silently.
+for **each** currency (≥ 80 % of weekdays), so a downsampled or truncated series fails instead of
+loading silently.
 Load: one transaction deletes the requested (date range × currencies) and inserts the fetched
 rows, then writes an audit row: re-running is idempotent and picks up ECB revisions.
 Exit codes: 0 ok · 1 fetch/validation/load failed (nothing changed) · 2 configuration error.
@@ -40,7 +42,7 @@ from typing import Any
 
 from ingestion.db import ConfigError, connect, database_url_from_env
 from ingestion.enrichment.http import FetchError, JsonClient
-from ingestion.enrichment.store import SCHEMA, ensure_schema, write_audit
+from ingestion.enrichment.store import SCHEMA, SchemaDriftError, ensure_schema, write_audit
 
 FRANKFURTER_V1 = "https://api.frankfurter.dev/v1"
 SOURCE = "ECB via Frankfurter v1"
@@ -50,6 +52,7 @@ DEFAULT_QUOTES = ("BRL", "USD")
 NOT_FROM_ECB = {"ARS": "the ECB does not publish an ARS reference rate"}
 MIN_WEEKDAY_COVERAGE = 0.8
 MIN_WEEKDAYS_FOR_DENSITY_CHECK = 20
+MAX_START_SNAP = timedelta(days=7)  # longest TARGET closure (Good Friday..Easter Monday) is 4 days
 
 EXIT_OK, EXIT_FAILED, EXIT_CONFIG = 0, 1, 2
 
@@ -100,7 +103,12 @@ def parse_rates(payload: Any, start: date, end: date, quotes: tuple[str, ...]) -
         if rate_date > end:
             raise FetchError(f"date {day} after the requested range {start}..{end}")
         if rate_date < start:
-            # Frankfurter snaps the start back to the previous publication day.
+            # Frankfurter snaps the start back to the previous publication day (a few days at most).
+            if start - rate_date > MAX_START_SNAP:
+                raise FetchError(
+                    f"date {day} more than {MAX_START_SNAP.days} days before the requested range"
+                    f" {start}..{end}"
+                )
             dropped.append(rate_date)
             continue
         if not isinstance(rates, dict):
@@ -133,20 +141,23 @@ def parse_rates(payload: Any, start: date, end: date, quotes: tuple[str, ...]) -
     return sorted(out)
 
 
-def check_density(rows: list[FxRate], start: date, end: date, today: date) -> None:
-    """A full daily series has a rate on ~97 % of weekdays (TARGET holidays aside)."""
+def check_density(
+    rows: list[FxRate], start: date, end: date, today: date, quotes: tuple[str, ...]
+) -> None:
+    """A full daily series has a rate on ~97 % of weekdays (TARGET holidays aside), per currency."""
     last_published = min(end, today - timedelta(days=1))
     if last_published < start:
         return
     weekdays = weekdays_between(start, last_published)
     if weekdays < MIN_WEEKDAYS_FOR_DENSITY_CHECK:
         return
-    days = len({r.rate_date for r in rows})
-    if days < MIN_WEEKDAY_COVERAGE * weekdays:
-        raise FetchError(
-            f"{start}..{end}: only {days} rate days for {weekdays} weekdays "
-            "(downsampled or truncated series?)"
-        )
+    for quote in quotes:
+        days = len({r.rate_date for r in rows if r.quote_currency == quote})
+        if days < MIN_WEEKDAY_COVERAGE * weekdays:
+            raise FetchError(
+                f"{start}..{end}: only {days} {quote} rate days for {weekdays} weekdays "
+                "(downsampled or truncated series?)"
+            )
 
 
 def fetch_rates(
@@ -160,7 +171,7 @@ def fetch_rates(
             ok_statuses=(404,),
         )
         chunk = [] if status == 404 else parse_rates(payload, chunk_start, chunk_end, quotes)
-        check_density(chunk, chunk_start, chunk_end, today)
+        check_density(chunk, chunk_start, chunk_end, today, quotes)
         logger.info("fx %s..%s: %d rates", chunk_start, chunk_end, len(chunk))
         rows.extend(chunk)
     if not rows:
@@ -171,7 +182,7 @@ def fetch_rates(
 def load_rates(conn, rows: list[FxRate], start: date, end: date, quotes: tuple[str, ...]) -> int:
     load_id = uuid.uuid4()
     with conn.transaction(), conn.cursor() as cur:
-        ensure_schema(cur)
+        ensure_schema(cur, "fx_rates")
         cur.execute(
             f"DELETE FROM {SCHEMA}.fx_rates WHERE base_currency = %s"  # noqa: S608
             " AND quote_currency = ANY(%s) AND rate_date BETWEEN %s AND %s",
@@ -281,7 +292,7 @@ def _load(url: str, rows: list[FxRate], start: date, end: date, quotes: tuple[st
     try:
         with conn:
             n = load_rates(conn, rows, start, end, quotes)
-    except psycopg.Error as exc:
+    except (psycopg.Error, SchemaDriftError) as exc:
         logger.error("fx load rolled back, nothing changed: %s", exc)
         return EXIT_FAILED
     logger.info("loaded %s.fx_rates: %d rows (%s..%s, %s)", SCHEMA, n, start, end, ",".join(quotes))

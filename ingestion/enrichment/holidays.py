@@ -35,7 +35,7 @@ from typing import Any
 
 from ingestion.db import ConfigError, connect, database_url_from_env
 from ingestion.enrichment.http import FetchError, JsonClient
-from ingestion.enrichment.store import SCHEMA, ensure_schema, write_audit
+from ingestion.enrichment.store import SCHEMA, SchemaDriftError, ensure_schema, write_audit
 
 NAGER_V3 = "https://date.nager.at/api/v3"
 SOURCE = "Nager.Date v3"
@@ -167,7 +167,7 @@ def fetch_holidays(client: JsonClient, plan: list[tuple[str, int]]) -> list[Holi
 def load_holidays(conn, rows: list[Holiday], plan: list[tuple[str, int]]) -> int:
     load_id = uuid.uuid4()
     with conn.transaction(), conn.cursor() as cur:
-        ensure_schema(cur)
+        ensure_schema(cur, "public_holidays")
         for country, year in plan:
             cur.execute(
                 f"DELETE FROM {SCHEMA}.public_holidays WHERE country_code = %s"  # noqa: S608
@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None, *, client: JsonClient | None = None) -> 
     try:
         with conn:
             n = load_holidays(conn, rows, plan)
-    except psycopg.Error as exc:
+    except (psycopg.Error, SchemaDriftError) as exc:
         logger.error("holiday load rolled back, nothing changed: %s", exc)
         return EXIT_FAILED
     logger.info("loaded %s.public_holidays: %d rows for %d country-years", SCHEMA, n, len(plan))

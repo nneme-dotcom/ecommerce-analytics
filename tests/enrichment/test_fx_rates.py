@@ -8,7 +8,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from ingestion.enrichment import fx_rates
+from ingestion.enrichment import fx_rates, store
 from ingestion.enrichment.fx_rates import (
     FxRate,
     check_density,
@@ -148,10 +148,35 @@ def test_density_check_catches_downsampled_series():
     start, end = date(2017, 1, 1), date(2017, 12, 31)
     weekly = [FxRate(start + timedelta(weeks=i), "EUR", "BRL", Decimal(3)) for i in range(52)]
     with pytest.raises(FetchError, match="downsampled or truncated"):
-        check_density(weekly, start, end, TODAY)
+        check_density(weekly, start, end, TODAY, ("BRL",))
     # A short or not-yet-published range is not checked.
-    check_density([], TODAY, TODAY, TODAY)
-    check_density([], date(2026, 10, 25), TODAY, TODAY)
+    check_density([], TODAY, TODAY, TODAY, QUOTES)
+    check_density([], date(2026, 10, 25), TODAY, TODAY, QUOTES)
+
+
+def test_density_is_checked_per_currency():
+    # BRL on all 21 weekdays of a range, USD on only 3 of them: the combined day count is full.
+    start, end = date(2017, 3, 1), date(2017, 3, 29)
+    payload = fake_series(start, end, ("BRL",))
+    assert len(payload["rates"]) == 21
+    for day in sorted(payload["rates"])[:3]:
+        payload["rates"][day]["USD"] = Decimal("1.05")
+    rows = parse_rates(payload, start, end, QUOTES)  # USD is present, so this passes
+    with pytest.raises(FetchError, match="only 3 USD rate days for 21 weekdays"):
+        check_density(rows, start, end, TODAY, QUOTES)
+    check_density(rows, start, end, TODAY, ("BRL",))
+
+
+def test_date_far_before_the_chunk_start_is_an_error():
+    start, end = date(2017, 1, 1), date(2017, 12, 31)
+    payload = fake_series(start, end)
+    payload["rates"]["2010-06-01"] = {"BRL": Decimal("2.2"), "USD": Decimal("1.2")}
+    with pytest.raises(FetchError, match="2010-06-01 more than 7 days before"):
+        parse_rates(payload, start, end, QUOTES)
+    # Exactly 7 days before the start is still a tolerated snap.
+    payload = fake_series(start, end)
+    payload["rates"]["2016-12-25"] = {"BRL": Decimal("3.4"), "USD": Decimal("1.0")}
+    assert min(r.rate_date for r in parse_rates(payload, start, end, QUOTES)) == date(2017, 1, 2)
 
 
 def test_chunk_with_404_and_nothing_else_fails():
@@ -259,3 +284,51 @@ def test_table_with_drifted_column_type_is_recreated(db_conn):
         )
         assert cur.fetchone() == ("numeric",)
     assert fx_table(db_conn) == [(date(2017, 1, 2), "BRL", Decimal("3.4305123456789"))]
+
+
+def _audit_rows(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT table_name, row_count FROM raw_enrichment._load_audit ORDER BY 1")
+        return cur.fetchall()
+
+
+def test_drifted_audit_table_is_never_dropped(database_url, db_conn, monkeypatch):
+    with db_conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA raw_enrichment")
+        cur.execute(
+            "CREATE TABLE raw_enrichment._load_audit (load_id uuid, table_name text,"
+            " row_count integer, params jsonb, loaded_at timestamptz)"
+        )
+        cur.execute(
+            "INSERT INTO raw_enrichment._load_audit VALUES"
+            " (gen_random_uuid(), 'fx_rates', 7, '{}', now())"
+        )
+    rows = [FxRate(date(2017, 1, 2), "EUR", "BRL", Decimal("3.43"))]
+    with pytest.raises(store.SchemaDriftError, match="append-only"):
+        load_rates(db_conn, rows, date(2017, 1, 2), date(2017, 1, 2), ("BRL",))
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    code = fx_rates.main(
+        ["--start", "2018-01-01", "--end", "2018-01-31"], client=client_for(FakeFrankfurter())
+    )
+    assert code == 1
+    assert _audit_rows(db_conn) == [("fx_rates", 7)]  # history kept
+    with db_conn.cursor() as cur:  # nothing else was created: the transaction rolled back
+        cur.execute("SELECT to_regclass('raw_enrichment.fx_rates')")
+        assert cur.fetchone() == (None,)
+
+
+def test_fx_load_leaves_a_drifted_holidays_table_alone(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA raw_enrichment")
+        cur.execute(
+            "CREATE TABLE raw_enrichment.public_holidays (country_code char(2), holiday_date date,"
+            " name text)"
+        )
+        cur.execute("INSERT INTO raw_enrichment.public_holidays VALUES ('BR', '2017-01-01', 'x')")
+    rows = [FxRate(date(2017, 1, 2), "EUR", "BRL", Decimal("3.43"))]
+    load_rates(db_conn, rows, date(2017, 1, 2), date(2017, 1, 2), ("BRL",))
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT * FROM raw_enrichment.public_holidays")
+        assert cur.fetchall() == [("BR", date(2017, 1, 1), "x")]
+    assert fx_table(db_conn) == [(date(2017, 1, 2), "BRL", Decimal("3.43"))]
+    assert _audit_rows(db_conn) == [("fx_rates", 1)]

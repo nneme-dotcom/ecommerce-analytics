@@ -238,9 +238,10 @@ source is BCRA (Frankfurter v2 exposes it as provider `BCRA`), not decided.
 Load rule: one transaction deletes the requested date range × currencies and inserts the fetched
 rows (idempotent; picks up revisions). Frankfurter snaps a range start that is not a publication
 day back to the previous one (a request from 2024-01-01 starts on 2023-12-29). Such leading dates
-are dropped, because the previous yearly chunk already covers them; a date after the range end is
-an error. A chunk (one calendar year per request) must be dense
-(≥ 80 % of weekdays have a rate) or the run fails; an empty answer never deletes data.
+are dropped, because the previous yearly chunk already covers them, but only up to 7 calendar days
+before the range start; an older date, or a date after the range end, is an error. A chunk (one
+calendar year per request) must be dense **for each currency** (≥ 80 % of weekdays have a rate
+for that `quote_currency`) or the run fails; an empty answer never deletes data.
 
 ### `raw_enrichment.public_holidays` (`python -m ingestion.enrichment.holidays`)
 
@@ -270,8 +271,11 @@ override with `--only CC:YYYY[-YYYY]`. Load rule: one transaction deletes the re
 (country, year) pairs and inserts the fetched rows. A (country, year) that answers with no entries
 fails the run and nothing changes.
 
-Tables in `raw_enrichment` are re-created inside the load transaction if their columns (names,
-order or types) drift from this contract (no `CASCADE`).
+Schema drift (columns' names, order or types differ from this contract): each loader re-creates
+**only its own table** (`fx_rates` or `public_holidays`) inside the load transaction (no
+`CASCADE`). Any other missing table is created; another drifted data table is left untouched
+(warning logged). `_load_audit` is **never dropped**: if it drifts, the load fails (exit 1) and the
+transaction rolls back with nothing changed; migrate it by hand.
 
 ### `raw_enrichment._load_audit` (append-only)
 
