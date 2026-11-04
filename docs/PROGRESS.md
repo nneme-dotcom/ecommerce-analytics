@@ -88,7 +88,7 @@ scripts/warehouse_report.py (new), tests/test_warehouse_env.py (new),
 tests/test_warehouse_report.py (new), docs/DATA_CONTRACT.md (§1, §2, §3), docs/DECISIONS.md
 (ADR-017), docs/PLAN.md, docs/PROGRESS.md
 
-Review round 1 (PR #13 approved with low findings; all fixed, not committed): L1
+Review round 1 (PR #13 approved with low findings; fixed in 924c72c, round 2 APPROVE): L1
 `warehouse_env.py` now refuses, before `urlsplit`, whitespace or any control character (Unicode
 `Cc`, so C1 too) in the URL after the same `.strip()` as the loaders, and refuses a netloc with
 more than one `@` (Python splits user info at the last `@`, libpq at the first; it now splits at

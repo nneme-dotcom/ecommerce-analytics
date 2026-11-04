@@ -27,6 +27,7 @@ Status: `todo` · `in progress` · `in review` · `done`.
 | 1.9 | Snapshot writer: handle lone surrogates in API strings | data-engineer | todo | `snapshot._write_jsonl_gz` cannot fail on a lone surrogate from the API (replace or escape it, and record it); test added (PR #11 review side note: `json.loads` turns a `\udc80` escape into a str that `.encode("utf-8")` refuses) |
 | 1.10 | ML raw loader polish (PR #11 round-2 low findings) | data-engineer | todo | A file read `OSError` names the folder/file (load.py:256,298); the orphan-plus-drift error and §1b also offer "delete that day's rows by hand" when a day was removed on purpose (load.py:483-490); "stored day(s)" wording in both messages (load.py:493-497) |
 | 1.11 | dbt CI polish (PR #12 round-2 low findings) | analytics-engineer | todo | Confirm the FX/holiday/translation values in `warehouse/fixtures/` against the live APIs (or soften the README "real public facts" wording; the 2017-11-20 BR entry looks hand-made); `persist-credentials: false` on the `python` and `secrets` CI jobs |
+| 1.12 | `warehouse_env.py` URL parity with libpq (PR #13 round-2 low findings) | devops | todo | Refuse `%` in the host; strict percent-decoding (`%[0-9A-Fa-f]{2}`, `errors="strict"`); case-sensitive `postgresql://`/`postgres://` prefix on the raw URL; refuse any `#` and empty query pairs (`?&`); decoded-value check refuses all Unicode Cc like the raw check; keep the summary step's DB errors type-only |
 
 ## Phase 2 — Model and metrics
 
