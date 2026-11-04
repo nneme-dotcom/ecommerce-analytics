@@ -4,8 +4,8 @@ Current state at the top; handoff log below (newest first).
 
 ## Current state
 
-- **Phase:** 1 — Data in
-- **Next up:** watch the daily runs — 1.3 needs 3 consecutive daily successes (1 of 3 so far: run 41729877814; the first scheduled run, 2026-11-04 05:23 UTC, did not fire). Then Phase 2 (2.1 star schema), plus small tasks 1.6, 1.8 and 1.7 (before 2027-01-31).
+- **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
+- **Next up:** 2.0 dbt skeleton and 2.5 ML raw loader; owner creates the Neon project and the `WAREHOUSE_DATABASE_URL` secret (ADR-014) before 2.6. Keep watching the daily ML runs for 1.3.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,16 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-04 — orchestrator — Phase 1 review, Phase 2 plan
+Done: owner approved Phase 1 (1.3 stays open until 3 consecutive scheduled successes; 1.6/1.8
+alongside Phase 2). Owner chose Neon (managed Postgres) for the warehouse and dbt for transformations:
+ADR-014. PLAN gains 2.0 (dbt skeleton + CI), 2.5 (ML snapshot raw loader) and 2.6 (Neon load workflow).
+Not done / open: Neon project and `WAREHOUSE_DATABASE_URL` secret (owner). The 2026-11-04 05:23 UTC
+scheduled snapshot did not fire; owner chose to wait for the next one.
+Gotchas for the next agent: never run dbt or loaders against Neon from the workspace (it has no
+secret and no route); develop against a throwaway Postgres. dbt reads raw schemas as sources only.
+Files touched: docs/DECISIONS.md, docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-04 — orchestrator — 1.5 closed
 Done: PR #8 merged (squash 541596b) after review round 3 (APPROVE) and green CI. First live

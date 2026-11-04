@@ -27,8 +27,13 @@ Status: `todo` · `in progress` · `in review` · `done`.
 
 ## Phase 2 — Model and metrics
 
+Order: 2.0 → 2.1 (with 2.5 in parallel) → 2.6 → 2.2 → 2.3 → 2.4. Tasks 1.6 and 1.8 run alongside.
+
 | # | Task | Owner | Status | Acceptance criteria |
 |---|------|-------|--------|---------------------|
+| 2.0 | dbt project skeleton in `warehouse/` + CI `dbt build` on a throwaway Postgres (ADR-014) | analytics-engineer | todo | `dbt build` green in CI on fixtures; sources declared for `raw_olist` and `raw_enrichment`; profile reads env only |
+| 2.5 | Load ML snapshots (data repo) into `raw_mercadolibre` | data-engineer | todo | Tables defined in DATA_CONTRACT first; idempotent per `snapshot_date`; tests on fixture snapshots |
+| 2.6 | Warehouse on Neon: load workflow (raw loads + `dbt build`) using `WAREHOUSE_DATABASE_URL` | devops | todo | Needs the owner's Neon project + secret; manual run loads all raw sources and builds green; Olist path decided in the PR |
 | 2.1 | Star schema for Olist (facts: order_items, deliveries; dims: date, customer, seller, product, geo) | analytics-engineer | todo | Documented in DATA_CONTRACT; data tests pass |
 | 2.2 | ML price-history model (fact_offer_snapshot, dim_product, dim_seller, dim_category) | analytics-engineer | todo | One row per offer per day; tests pass |
 | 2.3 | Business metric marts (revenue, delivery delay, review impact, cohorts, price dynamics) | analytics-engineer | todo | Each metric has a definition in DATA_CONTRACT |

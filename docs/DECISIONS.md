@@ -198,3 +198,28 @@ Migrate to v4 before 2027-01-31 once its API is verified live (PLAN 1.7).
 **Consequences.** `raw_enrichment.public_holidays` columns follow v3 (`local_name`, `is_global`,
 `counties`, `holiday_types`, `is_fixed`, `launch_year`). The v4 migration will change them, with a
 contract update in the same PR. The FX part of ADR-012 still stands.
+
+## ADR-014 — Warehouse on managed PostgreSQL (Neon), transformations in dbt (2026-11-04)
+
+**Context.** Phase 1 loads raw data only into throwaway databases (CI service containers, the manual
+enrichment workflow). Phase 2 needs a persistent warehouse that GitHub Actions can write to and the
+Phase 2.4 API can read from. The owner reviewed Phase 1 and approved it, with tasks 1.6/1.8 done
+alongside Phase 2.
+
+**Decision (owner).**
+- **Neon free plan** (managed PostgreSQL), one project in an EU region. Limits checked on 2026-11-04
+  (neon.com/docs/introduction/free-tier): 1 GB storage per project, 100 CU-hours per month, compute
+  suspends after 5 min idle. Our raw data is well under 1 GB (Olist ≈ 1.55 M text rows; ML ≈ 2.5 k
+  offers per day).
+- The connection string is the Actions secret **`WAREHOUSE_DATABASE_URL`**, created by the owner in the
+  GitHub UI. It is never pasted in chat, committed, or logged (`ingestion/db.py` already never logs
+  the URL).
+- **dbt** (`dbt-core` + `dbt-postgres`, pinned) for staging → star schema → marts, in `warehouse/`.
+  Models carry dbt tests (unique, not_null, relationships, accepted values) and docs. CI runs
+  `dbt build` against a throwaway PostgreSQL with small fixtures, never against Neon.
+- Raw schemas stay owned by the Python loaders (`raw_olist`, `raw_enrichment`, and a new
+  `raw_mercadolibre`); dbt only reads them (as sources) and writes its own schemas.
+
+**Consequences.** One more account (owner) and secret. Free-plan compute suspends when idle, so the
+first query after a pause is slower; acceptable for a portfolio. If limits are hit, the dbt project
+runs unchanged on any PostgreSQL. Phase 4 (AWS) may move the warehouse; the layout does not change.
