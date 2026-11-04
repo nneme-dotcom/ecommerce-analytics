@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.6 Neon load workflow is `in review` (branch `devops/warehouse-load`); after merge, its first live run (dispatch `mode=full`) is the 2.6 acceptance. Then 2.1. Follow-ups 1.6–1.11 alongside. Keep watching the daily ML runs for 1.3. Neon PostgreSQL version not yet confirmed (the first run's log does not show it; check in the Neon console).
+- **Next up:** 2.1 Olist star schema (now testable on the real load in Neon), then 2.2. 1.3 is at 2 of 3 scheduled successes (2026-11-04 fired at 13:06 UTC, ~8 h late). Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,21 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-04 — orchestrator — 2.6 first live run
+Done: PR #13 merged (b401a7e). Owner confirmed the Environment `warehouse` allows only the `main`
+branch. First `mode=full` run 41929479775 on Neon (EU Frankfurt): every step green.
+`raw_mercadolibre`: 2 days (2026-11-03, 2026-11-04): highlights 200, products 172, offers 4,619,
+trends 100. `raw_olist`: the nine tables match DATA_CONTRACT §2 counts (orders 99,441; geolocation
+1,000,163; …). `raw_enrichment`: fx_rates 5,210, public_holidays 74. `dbt build` PASS=38 on the real
+data. Log check: no unmasked host, endpoint id or password in the run log.
+The scheduled ML snapshot for 2026-11-04 did fire, at 13:06 UTC (run 41835070250, `success`),
+about 8 h after the 05:23 cron: GitHub delays, it did not skip. 1.3: 2 of 3.
+Not done / open: `pg_database_size` is only in the job summary (not read back here). 1.3 needs one
+more scheduled success.
+Gotchas for the next agent: the warehouse now holds real data; develop models against a local
+throwaway DB with fixtures, and validate on Neon only through `warehouse-load.yml` on `main`.
+Files touched: docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-04 — devops — 2.6 (branch `devops/warehouse-load`)
 Done: `.github/workflows/warehouse-load.yml` ("Warehouse load"): `workflow_run` after each
