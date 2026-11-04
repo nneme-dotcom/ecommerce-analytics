@@ -92,8 +92,14 @@ Filled in as each area is built. Keep this section accurate.
 | Load ECB FX rates (EUR→BRL,USD, Frankfurter v1) into `raw_enrichment.fx_rates` (env `DATABASE_URL`, not needed with `--csv-out` only) | `python -m ingestion.enrichment.fx_rates [--start 2016-09-01] [--end YYYY-MM-DD] [--csv-out <file>]` |
 | Load public holidays (Nager.Date v3; BR 2016–2018, AR 2026→next year) into `raw_enrichment.public_holidays` (env `DATABASE_URL`, not needed with `--csv-out` only) | `python -m ingestion.enrichment.holidays [--only CC:YYYY[-YYYY]] [--csv-out <file>]` |
 | Run both enrichment loads live into a throwaway Postgres (manual, no secrets) | `gh workflow run enrichment-load.yml --ref main` (watch: `gh run watch`) |
+| Load ML snapshots from the data repo into `raw_mercadolibre` (env `DATABASE_URL`; skips unchanged days, ADR-015) | `python -m ingestion.mercadolibre.load --source <data-repo-root> [--full-reload]` |
+| Install dbt (warehouse) | `pip install -r requirements-dbt.txt` |
+| Load warehouse CI fixtures into a throwaway DB (env `DATABASE_URL`; opt-in `FIXTURE_DB_ALLOW=1`; refuses a DB with more rows than the fixtures; never the real warehouse) | `FIXTURE_DB_ALLOW=1 python -m warehouse.ci.fixture_db load --inventory <file>` |
+| dbt build (env `DBT_PG_HOST`, `DBT_PG_PORT`, `DBT_PG_USER`, `DBT_ENV_SECRET_PG_PASSWORD`, `DBT_PG_DBNAME`, `DBT_PG_SSLMODE`; all optional, local defaults) | `dbt build --project-dir warehouse --profiles-dir warehouse` |
+| Check dbt created only `staging`/`core`/`marts` and left `raw_*` and `public` unchanged (fixture DB only) | `python -m warehouse.ci.fixture_db check --inventory <file>` |
+| Test the dbt schema guards (needs dbt) | `pytest tests/warehouse` |
 
-Olist and enrichment loaders exit 0 ok, 1 fetch/validation/load failed (nothing changed), 2 configuration error.
+Olist, enrichment and ML raw loaders exit 0 ok, 1 fetch/validation/load failed (nothing changed), 2 configuration error.
 
 Snapshot exit codes (ADR-008; the scheduled workflow branches on these):
 
