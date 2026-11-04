@@ -131,6 +131,111 @@ All five verified live on 2026-11-03 (each returned 20 highlights; see docs/API_
 
 ---
 
+## 1b. Mercado Libre raw in PostgreSQL — `draft`
+
+Schema `raw_mercadolibre`, written by task 2.5 (`python -m ingestion.mercadolibre.load --source
+<data-repo-root>`, env `DATABASE_URL`). It mirrors the §1 day folders of the private data repo, which
+stays the system of record (ADR-003, ADR-014): the schema can be dropped and rebuilt from it at any
+time. One table per snapshot file, plus `runs` (from `run.json`) and `_load_audit`.
+
+Typed columns are exactly the §1 fields; no field is added or derived. **`payload` (jsonb) holds the
+full line as written** (the run.json object, for `runs`), so nothing is lost if a typed column is
+null. Loader-added columns: `line_no` (1-based line in the `.jsonl.gz`), and `load_id`/`file_sha256`
+in `runs`.
+
+### Load rules
+- **Every** `mercadolibre/snapshot_date=YYYY-MM-DD/` folder under `--source` is validated before the
+  database is touched; `.tmp-*`/`.old-*` leftovers are skipped with a warning. Days of any `status`
+  (incl. `failed`) are loaded; filter on `runs.status` downstream. The ADR-007 replacement rule
+  already happened in the data repo: the loader takes each day folder as it is.
+- **Validation** (any failure = exit 1, nothing changed): `run.json` present, a JSON object with
+  `run_id` (uuid), `snapshot_date` (= folder date), `status` (`success`·`partial`·`failed`) and
+  `row_counts` (the four files, non-negative ints); all four `.jsonl.gz` files present and valid gzip;
+  every line UTF-8 JSON object (no blank lines; NaN/Infinity refused) with `snapshot_date` = folder
+  date, `run_id` = run.json `run_id`, `captured_at` an ISO-8601 timestamp with offset, and the
+  required fields below; line count = `row_counts[<file>]`. Error messages name the file and line,
+  **never the line content** (Actions logs of this repo are public).
+- **Typed columns are lenient:** a value that is absent or of the wrong JSON type (e.g. a string
+  `price`, a bool where an int is expected, an int outside the column range) is loaded as NULL; the
+  original stays in `payload`. Numbers are parsed as exact decimals (no float rounding).
+- **Idempotent per `snapshot_date`, one transaction for the whole run:** for each day to load, delete
+  that date from the five tables, `COPY` the files, check that the loaded row count per table equals
+  `row_counts` (runs: 1), append the audit rows. Any failure rolls the whole run back.
+- **Unchanged days are skipped (ADR-015):** a day whose five file SHA-256s equal `runs.file_sha256`
+  of the loaded copy is not rewritten (no delete, no insert, no audit row). `--full-reload` reloads
+  every day; a data table that was just created or re-created forces a full reload too. A re-run day
+  (new files in the data repo) is therefore replaced on the next load.
+- Dates present in the database but with no folder under `--source` are kept (warning logged).
+- **Schema drift** (columns' names, order or types differ from this section): every data table here
+  (`runs`, `highlights`, `products`, `offers`, `trends`) is owned by this loader and is dropped and
+  re-created inside the load transaction (no `CASCADE`: a dependent view makes the load fail).
+  `_load_audit` is checked **first** and **never dropped**: if it drifts the load fails (exit 1) with
+  nothing changed; migrate it by hand. Constraints (PK, NOT NULL) are not part of the drift check.
+- Exit codes: 0 ok (incl. nothing to reload) · 1 validation or load failed (nothing changed) · 2
+  configuration error (`DATABASE_URL` missing). `DATABASE_URL` is never logged.
+
+### Common columns (the four file tables, in this order)
+| column | type | notes |
+|--------|------|-------|
+| snapshot_date | date | required, = folder date |
+| run_id | uuid | required, = run.json `run_id` |
+| line_no | integer | 1-based line in the file; PK (`snapshot_date`, `line_no`) |
+| captured_at | timestamptz | required |
+| *typed fields* | | per table below |
+| payload | jsonb | the full line |
+
+### `raw_mercadolibre.highlights`
+`category_id` text (required) · `position` integer? · `product_id` text (required) · `type` text?
+
+### `raw_mercadolibre.products`
+`product_id` text (required) · `name` text? · `domain_id` text? · `family_name` text? · `status`
+text? · `brand` text? · `model` text? · `permalink` text?
+
+### `raw_mercadolibre.offers`
+`product_id` text (required) · `item_id` text? · `seller_id` bigint? · `official_store_id` bigint? ·
+`price` numeric? · `original_price` numeric? · `currency_id` text? · `condition` text? ·
+`listing_type_id` text? · `category_id` text? · `free_shipping` boolean? · `logistic_type` text? ·
+`shipping_mode` text? · `deal_ids` text[]? · `tags` text[]? · `seller_state` text?
+
+`item_id` is not a key in raw (the writer keeps an offer without `item_id`); one row per offer per
+product per day. Uniqueness of (`snapshot_date`, `product_id`, `item_id`) is a `staging` test.
+
+### `raw_mercadolibre.trends`
+`position` integer (required) · `keyword` text? · `url` text?
+
+### `raw_mercadolibre.runs` (one row per loaded day)
+| column | type | notes |
+|--------|------|-------|
+| snapshot_date | date | PK |
+| run_id | uuid | required |
+| status | text | required: `success` · `partial` · `failed` |
+| started_at, finished_at | timestamptz? | |
+| site_id | text? | |
+| categories, categories_requested | text[]? | |
+| requests_made, request_cap | integer? | |
+| request_cap_reached | boolean? | |
+| row_counts | jsonb | required |
+| skipped_highlights | jsonb? | |
+| products_without_offers | integer? | |
+| errors | jsonb? | |
+| payload | jsonb | the full run.json |
+| load_id | uuid | load that wrote this day |
+| file_sha256 | jsonb | `{"run.json": <sha256>, "highlights.jsonl.gz": ..., ...}` of the loaded files |
+
+### `raw_mercadolibre._load_audit` (append-only, one row per table per day loaded)
+| column | type | notes |
+|--------|------|-------|
+| load_id | uuid | one per run; PK (`load_id`, `snapshot_date`, `table_name`) |
+| snapshot_date | date | |
+| table_name | text | `runs`, `highlights`, `products`, `offers`, `trends` |
+| run_id | uuid | snapshot run that produced the files |
+| source_file | text | e.g. `offers.jsonl.gz` (no path) |
+| row_count | bigint | rows loaded |
+| file_sha256 | char(64) | SHA-256 of the file loaded |
+| loaded_at | timestamptz | transaction time |
+
+---
+
 ## 2. Olist raw — `draft`
 
 Source: the Kaggle dataset `olistbr/brazilian-ecommerce` ("Brazilian E-Commerce Public Dataset by

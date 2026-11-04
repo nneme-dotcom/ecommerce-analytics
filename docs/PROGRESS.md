@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.0 dbt skeleton and 2.5 ML raw loader; before 2.6 the owner creates the Neon project, the Environment `warehouse` (main only) with `WAREHOUSE_DATABASE_URL`, and pushes `archive.zip` to the data repo (ADR-014). Keep watching the daily ML runs for 1.3.
+- **Next up:** 2.0 dbt skeleton; 2.5 ML raw loader is in review; before 2.6 the owner creates the Neon project, the Environment `warehouse` (main only) with `WAREHOUSE_DATABASE_URL`, and pushes `archive.zip` to the data repo (ADR-014). Keep watching the daily ML runs for 1.3.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,44 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-04 — data-engineer — 2.5 (branch `ingestion/ml-raw-load`, uncommitted for the orchestrator)
+Done: DATA_CONTRACT **§1b `raw_mercadolibre`** (contract first): `runs`, `highlights`, `products`,
+`offers`, `trends` (typed columns = exactly the §1 fields + `line_no` + full-line `payload jsonb`)
+and an append-only `_load_audit` (one row per table per day loaded). `python -m
+ingestion.mercadolibre.load --source <data-repo-root> [--full-reload]` (env `DATABASE_URL`): validates
+**every** `snapshot_date=` folder before touching the DB (run.json present/well-formed, gzip JSONL,
+meta fields = folder/run.json, required keys, line count = `row_counts`; errors name file:line,
+never content), then one transaction: per changed day delete that date from the five tables, `COPY`,
+DB count check, audit rows. ADR-015: days whose five file SHA-256s equal `runs.file_sha256` are
+skipped (Neon WAL/storage); `--full-reload` or a (re-)created table reloads all. Drift
+(`raw_schema.py`): `_load_audit` checked first and never dropped (`SchemaDriftError`, exit 1); the
+loader's own data tables are re-created without `CASCADE`. psycopg errors of SQLSTATE class 22/23
+are logged as class + SQLSTATE only (COPY errors can quote row values; Actions logs are public).
+Tests: `tests/mercadolibre/test_ml_raw_load.py`, 49 tests on day folders written by the real
+`snapshot.write_snapshot` from `ml_fixtures` payloads (idempotency/skip, full reload, re-run day,
+count mismatch, missing run.json/file, malformed/blank/non-object lines, bad gzip, meta mismatch,
+NaN/NUL, lenient typing, failed day, orphan DB day kept, data-table drift, audit drift, dependent
+view). `ruff check .` clean; full `pytest`: 256 passed, 2 skipped (Olist real data), PostgreSQL 16.
+Real-data check: cloned the data repo to the scratchpad (outside the worktree), loaded 2026-11-03
+into a throwaway DB: exit 0; runs 1, highlights 100 (PRODUCT 87, USER_PRODUCT 10, ITEM 3), products
+87, offers 2,313, trends 50 (= run.json); 0 NULL price/item_id/seller_id; 0 typed-vs-payload
+mismatches; 0 duplicate (date, product, item). Re-run: 0 loaded, 1 unchanged; `--full-reload`
+identical counts. Clone and DB deleted; no real data copied anywhere.
+Not done / open: never run against Neon (2.6). Proposed CLAUDE.md Commands row (orchestrator):
+`| Load ML snapshots from the data repo into raw_mercadolibre (env DATABASE_URL; skips unchanged days, ADR-015) | python -m ingestion.mercadolibre.load --source <data-repo-root> [--full-reload] |`
+and the exit-code line "ML raw loader exits 0 ok, 1 validation/load failed (nothing changed), 2
+configuration error" (same convention as Olist/enrichment).
+Gotchas for the next agent: 2.6 passes the data repo checkout root (the folder holding
+`mercadolibre/`), not `mercadolibre/` itself. Daily runs normally write one day; a re-run day is
+picked up via its new hashes. A dbt view on a raw ML table blocks a drift re-create (exit 1, by
+design). `offers.item_id` is nullable and not a key in raw: test uniqueness of (snapshot_date,
+product_id, item_id) in staging (2.2). `runs.status` includes `failed` days (empty files); filter
+downstream. The drift check ignores constraints (as `store.py`, PLAN 1.8). `store.py` was not
+changed; `raw_schema.py` already checks `_load_audit` first (the 1.8 finding).
+Files touched: ingestion/mercadolibre/load.py, ingestion/mercadolibre/raw_schema.py (new),
+tests/mercadolibre/test_ml_raw_load.py (new), docs/DATA_CONTRACT.md (§1b), docs/DECISIONS.md
+(ADR-015), docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-04 — orchestrator — Phase 1 review, Phase 2 plan
 Done: owner approved Phase 1 (1.3 stays open until 3 consecutive scheduled successes; 1.6/1.8
