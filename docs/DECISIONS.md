@@ -417,3 +417,69 @@ reload). If the snapshot workflow is renamed, the `workflows:` filter
 must follow (it matches the `name:`). If the holidays load fails in January (e.g. Nager.Date
 down), every daily run retries it and stays red until it succeeds. A pending `full` dispatch can be displaced by a chained
 `daily` run queued behind the same running job; re-dispatch it.
+
+## ADR-018 — Olist star schema: grains, natural keys, geo rule, FX rule (2026-11-05)
+
+**Context.** Task 2.1 builds the Olist star schema in dbt (`core`, DATA_CONTRACT §3) on Neon's
+free plan (ADR-014: 1 GB). The raw data has several traps: `customer_id` is per order while
+`customer_unique_id` is the person; `geolocation` has ~1 M rows for ~19 k zip prefixes (accent
+variants, exact duplicates, a few points outside Brazil) and lacks some prefixes that customers
+and sellers use; ECB rates do not exist on weekends and TARGET holidays; Olist's delivery
+estimate is a date while the delivery is a timestamp.
+
+**Decision.**
+- **Grains.** `fact_order_items`: one row per order item, every raw record, every status.
+  `fact_deliveries`: one row per order, every status (so both reconcile 1 : 1 with raw, tested).
+  `dim_customer` is the **person** (`customer_unique_id`); facts carry `customer_unique_id` as
+  the FK and `customer_id` as a degenerate attribute, plus the order-time zip prefix.
+  `dim_seller`, `dim_product`: one row per id. `dim_geo`: one row per zip prefix. `dim_date`:
+  every day of the whole years spanned by the order timestamps. Staging stays one row per raw
+  record; any aggregation lives in `core`.
+- **Keys: natural keys everywhere**, no surrogate keys. Olist ids are stable, unique 32-hex
+  strings, the zip prefix is the geo key and `dim_date` is keyed by the `date` itself. A
+  surrogate (hash or sequence) would add a column and a join to every fact without adding
+  history (Olist is a static extract; no slowly changing dimensions are needed). The ML model
+  (2.2) may choose differently for its own dimensions.
+- **Geo rule (deterministic).** Coordinates: per-axis **median** of the prefix's points
+  (`percentile_cont(0.5)`), which an outlier cannot drag; not the mean, not "first row" (raw
+  order is not stable). Place: the most frequent (city, state) pair, ties broken by byte order
+  (`COLLATE "C"`, so the result does not depend on the database collation). Prefixes missing
+  from geolocation are kept (customers' and sellers' most frequent pair, NULL coordinates,
+  `has_geolocation = false`) so every customer and seller zip has a `dim_geo` row and the
+  relationships tests can be strict. City spellings are not normalised (no accent folding):
+  that would be a guess; marts can fold if a metric needs it. **Coordinates outside Brazil**
+  (review round 1): when a prefix's median still lies outside a bounding box around Brazil
+  (lat −34..6, lng −74..−28, one macro shared by the model and its test; the eastern bound keeps
+  Fernando de Noronha), its `latitude` / `longitude` are NULLed and `has_invalid_coordinates`
+  is set; city / state stay. Chosen over keeping the coordinates with a flag and a test that
+  skips flagged rows: a wrong point in Europe or the ocean is worse than no point, and a NULL
+  cannot be put on a map by a consumer who forgot the flag. The bounding-box test is now an
+  error (it was a warning that fired permanently on 8 real prefixes, which teaches people to
+  ignore warnings).
+- **FX rule.** BRL→EUR with the latest ECB EUR→BRL rate on or before the purchase date, looking
+  back at most **7 days** (the longest ECB gap is 4 days); `fx_rate_date` records which rate.
+  Implemented by expanding each rate to the days it covers (window `lead`) and joining on the
+  date, so no range join. NULL before the first rate, or when no rate exists on or within 7 days
+  before the purchase date, rather than an older, stale rate. EUR amounts rounded to 4 decimals.
+  A test fails the build if any item inside the rate range has no rate. The test that re-derives
+  the expected rate computes it once per distinct purchase date (~630) and joins that to the
+  items; joining every item to the rate range was a nested loop of 112,650 items × all rates,
+  10.5 s on the real data and the slowest step of every daily build (review round 1).
+- **Delivery metrics** by calendar date (`delivered_customer_date` vs `estimated_delivery_date`),
+  only for `order_status = 'delivered'` with a customer delivery timestamp; otherwise NULL, not 0.
+- **Holiday flag**: nationwide public holidays only (`is_global` and type `Public`); NULL in a
+  year with no BR calendar loaded, instead of a false "not a holiday".
+- **Tests**: generic tests in `warehouse/tests/generic/` (no dbt packages, ADR-016), singular
+  tests in `warehouse/tests/core/`, and dbt **unit tests** for the geo, FX, delivery and
+  customer rules (inline inputs; they run as SELECTs during `dbt build`, also on Neon).
+
+**Consequences.** `core` adds ≈ 70 MB on Neon (measured; whole database ≈ 253 MB); geolocation
+is read from the staging view once per
+build and never stored twice. `core` tables are fully rebuilt by every `dbt build`, including
+the daily runs, although Olist never changes: that costs a few CU-seconds and some WAL per day;
+if it matters, a later task can select only the ML models on `daily` runs or make the Olist
+models incremental. Any marts that need a person-level count must use `customer_unique_id`.
+Items with no rate on or within 7 days before their purchase date (none in the real Olist range,
+2016-09-04 .. 2018-10-17, against FX from 2016-09-01) have NULL EUR amounts. Prefixes with
+`has_invalid_coordinates` drop out of any map or distance metric; their orders still count in
+every other metric.

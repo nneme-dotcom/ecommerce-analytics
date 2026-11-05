@@ -1,0 +1,129 @@
+# dbt unit tests for the core rules of ADR-018: exact expected outputs from small inline inputs,
+# independent of the fixture or real data. `dbt build` runs each one before its model (they
+# only run SELECTs; nothing is written). Only the listed columns are compared.
+version: 2
+
+unit_tests:
+  - name: dim_geo_median_mode_ties_and_fallback
+    description: >
+      Median lat/lng per axis (an outlier does not move it), most frequent (city, state) pair,
+      ties by byte order, and prefixes known only from customers/sellers fall back to their
+      most frequent pair with NULL coordinates. A prefix whose median lies outside Brazil's
+      bounding box (most points abroad) gets NULL coordinates and has_invalid_coordinates;
+      an oceanic island east of the mainland (Fernando de Noronha) keeps its point.
+    model: dim_geo
+    given:
+      - input: ref('stg_olist__geolocation')
+        rows:
+          - {geolocation_zip_code_prefix: '01310', geolocation_lat: -23.5, geolocation_lng: -46.5, geolocation_city: sao paulo, geolocation_state: SP}
+          - {geolocation_zip_code_prefix: '01310', geolocation_lat: -23.5, geolocation_lng: -46.5, geolocation_city: sao paulo, geolocation_state: SP}
+          - {geolocation_zip_code_prefix: '01310', geolocation_lat: -23.75, geolocation_lng: -46.75, geolocation_city: são paulo, geolocation_state: SP}
+          - {geolocation_zip_code_prefix: '01310', geolocation_lat: 40.0, geolocation_lng: -74.0, geolocation_city: sao paulo, geolocation_state: SP}
+          - {geolocation_zip_code_prefix: '22041', geolocation_lat: -22.75, geolocation_lng: -43.25, geolocation_city: rio de janeiro, geolocation_state: RJ}
+          - {geolocation_zip_code_prefix: '22041', geolocation_lat: -22.25, geolocation_lng: -43.75, geolocation_city: copacabana, geolocation_state: RJ}
+          - {geolocation_zip_code_prefix: '45000', geolocation_lat: 38.75, geolocation_lng: -9.25, geolocation_city: vitoria da conquista, geolocation_state: BA}
+          - {geolocation_zip_code_prefix: '45000', geolocation_lat: 38.5, geolocation_lng: -9.5, geolocation_city: vitoria da conquista, geolocation_state: BA}
+          - {geolocation_zip_code_prefix: '45000', geolocation_lat: -14.75, geolocation_lng: -40.75, geolocation_city: vitoria da conquista, geolocation_state: BA}
+          - {geolocation_zip_code_prefix: '53990', geolocation_lat: -3.75, geolocation_lng: -32.5, geolocation_city: fernando de noronha, geolocation_state: PE}
+      - input: ref('stg_olist__customers')
+        rows:
+          - {customer_id: c1, customer_zip_code_prefix: '01310', customer_city: other name, customer_state: SP}
+          - {customer_id: c2, customer_zip_code_prefix: '69900', customer_city: rio branco, customer_state: AC}
+          - {customer_id: c3, customer_zip_code_prefix: '69900', customer_city: rio branco, customer_state: AC}
+      - input: ref('stg_olist__sellers')
+        rows:
+          - {seller_id: s1, seller_zip_code_prefix: '69900', seller_city: Rio Branco, seller_state: AC}
+          - {seller_id: s2, seller_zip_code_prefix: '88015', seller_city: florianopolis, seller_state: SC}
+    expect:
+      rows:
+        - {zip_code_prefix: '01310', city: sao paulo, state: SP, latitude: -23.5, longitude: -46.625, geolocation_rows: 4, has_geolocation: true, has_invalid_coordinates: false}
+        - {zip_code_prefix: '22041', city: copacabana, state: RJ, latitude: -22.5, longitude: -43.5, geolocation_rows: 2, has_geolocation: true, has_invalid_coordinates: false}
+        - {zip_code_prefix: '45000', city: vitoria da conquista, state: BA, latitude: null, longitude: null, geolocation_rows: 3, has_geolocation: true, has_invalid_coordinates: true}
+        - {zip_code_prefix: '53990', city: fernando de noronha, state: PE, latitude: -3.75, longitude: -32.5, geolocation_rows: 1, has_geolocation: true, has_invalid_coordinates: false}
+        - {zip_code_prefix: '69900', city: rio branco, state: AC, latitude: null, longitude: null, geolocation_rows: 0, has_geolocation: false, has_invalid_coordinates: false}
+        - {zip_code_prefix: '88015', city: florianopolis, state: SC, latitude: null, longitude: null, geolocation_rows: 0, has_geolocation: false, has_invalid_coordinates: false}
+
+  - name: fact_order_items_fx_carry_forward_and_look_back
+    description: >
+      brl_per_eur = latest EUR->BRL rate on or before the purchase date within 7 days; USD
+      rates are ignored; before the first rate or past the look-back the EUR columns are NULL.
+    model: fact_order_items
+    given:
+      - input: ref('stg_olist__order_items')
+        rows:
+          - {order_id: o_before, order_item_id: 1, price: 10.00, freight_value: 2.00}
+          - {order_id: o_same_day, order_item_id: 1, price: 10.00, freight_value: 2.00}
+          - {order_id: o_gap, order_item_id: 1, price: 10.00, freight_value: 2.00}
+          - {order_id: o_weekend, order_item_id: 1, price: 10.00, freight_value: 2.00}
+          - {order_id: o_day_7, order_item_id: 1, price: 10.00, freight_value: 2.00}
+          - {order_id: o_day_8, order_item_id: 1, price: 10.00, freight_value: 2.00}
+      - input: ref('stg_olist__orders')
+        rows:
+          - {order_id: o_before, customer_id: c1, order_purchase_timestamp: '2017-10-01 23:59:59'}
+          - {order_id: o_same_day, customer_id: c1, order_purchase_timestamp: '2017-10-02 00:00:00'}
+          - {order_id: o_gap, customer_id: c1, order_purchase_timestamp: '2017-10-04 12:00:00'}
+          - {order_id: o_weekend, customer_id: c1, order_purchase_timestamp: '2017-10-07 09:00:00'}
+          - {order_id: o_day_7, customer_id: c1, order_purchase_timestamp: '2017-10-13 23:00:00'}
+          - {order_id: o_day_8, customer_id: c1, order_purchase_timestamp: '2017-10-14 00:00:01'}
+      - input: ref('stg_olist__customers')
+        rows:
+          - {customer_id: c1, customer_unique_id: u1, customer_zip_code_prefix: '01310'}
+      - input: ref('stg_enrichment__fx_rates')
+        rows:
+          - {rate_date: '2017-10-02', base_currency: EUR, quote_currency: BRL, rate: 4.0}
+          - {rate_date: '2017-10-03', base_currency: EUR, quote_currency: USD, rate: 1.25}
+          - {rate_date: '2017-10-06', base_currency: EUR, quote_currency: BRL, rate: 5.0}
+    expect:
+      rows:
+        - {order_id: o_before, fx_rate_date: null, brl_per_eur: null, price_eur: null, item_total_eur: null}
+        - {order_id: o_same_day, fx_rate_date: '2017-10-02', brl_per_eur: 4.0, price_eur: '2.5000', item_total_eur: '3.0000'}
+        - {order_id: o_gap, fx_rate_date: '2017-10-02', brl_per_eur: 4.0, price_eur: '2.5000', item_total_eur: '3.0000'}
+        - {order_id: o_weekend, fx_rate_date: '2017-10-06', brl_per_eur: 5.0, price_eur: '2.0000', item_total_eur: '2.4000'}
+        - {order_id: o_day_7, fx_rate_date: '2017-10-06', brl_per_eur: 5.0, price_eur: '2.0000', item_total_eur: '2.4000'}
+        - {order_id: o_day_8, fx_rate_date: null, brl_per_eur: null, price_eur: null, item_total_eur: null}
+
+  - name: fact_deliveries_metrics_by_date_only_when_delivered
+    description: >
+      Delivery metrics use calendar dates (a delivery during the estimated day is on time) and
+      exist only for status delivered with a customer delivery timestamp.
+    model: fact_deliveries
+    given:
+      - input: ref('stg_olist__orders')
+        rows:
+          - {order_id: early, customer_id: c1, order_status: delivered, order_purchase_timestamp: '2017-10-02 10:00:00', order_delivered_customer_date: '2017-10-10 21:00:00', order_estimated_delivery_date: '2017-10-18 00:00:00'}
+          - {order_id: same_day, customer_id: c1, order_status: delivered, order_purchase_timestamp: '2018-03-01 09:30:00', order_delivered_customer_date: '2018-03-10 15:00:00', order_estimated_delivery_date: '2018-03-10 00:00:00'}
+          - {order_id: late, customer_id: c1, order_status: delivered, order_purchase_timestamp: '2018-02-07 23:00:00', order_delivered_customer_date: '2018-02-19 01:00:00', order_estimated_delivery_date: '2018-02-15 00:00:00'}
+          - {order_id: delivered_no_date, customer_id: c1, order_status: delivered, order_purchase_timestamp: '2017-10-04 08:00:00', order_estimated_delivery_date: '2017-10-20 00:00:00'}
+          - {order_id: canceled_with_date, customer_id: c1, order_status: canceled, order_purchase_timestamp: '2017-10-01 16:00:00', order_delivered_customer_date: '2017-10-06 15:00:00', order_estimated_delivery_date: '2017-10-16 00:00:00'}
+          - {order_id: shipped, customer_id: c1, order_status: shipped, order_purchase_timestamp: '2017-10-07 14:00:00', order_estimated_delivery_date: '2017-10-30 00:00:00'}
+      - input: ref('stg_olist__customers')
+        rows:
+          - {customer_id: c1, customer_unique_id: u1, customer_zip_code_prefix: '01310'}
+    expect:
+      rows:
+        - {order_id: early, is_delivered: true, delivery_days: 8, delay_days: -8, is_on_time: true}
+        - {order_id: same_day, is_delivered: true, delivery_days: 9, delay_days: 0, is_on_time: true}
+        - {order_id: late, is_delivered: true, delivery_days: 12, delay_days: 4, is_on_time: false}
+        - {order_id: delivered_no_date, is_delivered: false, delivery_days: null, delay_days: null, is_on_time: null}
+        - {order_id: canceled_with_date, is_delivered: false, delivery_days: null, delay_days: null, is_on_time: null}
+        - {order_id: shipped, is_delivered: false, delivery_days: null, delay_days: null, is_on_time: null}
+
+  - name: dim_customer_one_row_per_person_latest_location
+    description: >
+      customer_unique_id is the grain; two customer_ids of one person collapse into one row
+      located at the latest purchase; a customer_id without an order still yields its person.
+    model: dim_customer
+    given:
+      - input: ref('stg_olist__customers')
+        rows:
+          - {customer_id: c1, customer_unique_id: u1, customer_zip_code_prefix: '20040', customer_city: rio de janeiro, customer_state: RJ}
+          - {customer_id: c2, customer_unique_id: u1, customer_zip_code_prefix: '22041', customer_city: rio de janeiro, customer_state: RJ}
+          - {customer_id: c3, customer_unique_id: u2, customer_zip_code_prefix: '01310', customer_city: sao paulo, customer_state: SP}
+      - input: ref('stg_olist__orders')
+        rows:
+          - {order_id: o1, customer_id: c1, order_purchase_timestamp: '2018-03-01 09:30:00'}
+          - {order_id: o2, customer_id: c2, order_purchase_timestamp: '2018-02-07 09:00:00'}
+    expect:
+      rows:
+        - {customer_unique_id: u1, customer_zip_code_prefix: '20040', customer_id_count: 2, first_purchase_at: '2018-02-07 09:00:00', last_purchase_at: '2018-03-01 09:30:00'}
+        - {customer_unique_id: u2, customer_zip_code_prefix: '01310', customer_id_count: 1, first_purchase_at: null, last_purchase_at: null}

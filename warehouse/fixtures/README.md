@@ -19,10 +19,31 @@ PostgreSQL with the real loaders, so the raw tables have exactly the DDL of DATA
 | `raw_enrichment/fx_rates_frankfurter_v1.json` (a Frankfurter v1 interval response + its request) | `ingestion.enrichment.fx_rates` (`parse_rates` + `load_rates`) | `raw_enrichment.fx_rates` |
 | `raw_enrichment/public_holidays_nager_v3.json` (Nager.Date v3 responses keyed `CC:YYYY`) | `ingestion.enrichment.holidays` (`parse_holidays` + `load_holidays`) | `raw_enrichment.public_holidays` |
 
-The Olist rows are referentially consistent so models can be tested end to end: 3 orders
-(two delivered, one on time and one late; one canceled), 3 customers for 2 unique customers,
-2 sellers, 4 products (one with no category), payments that add up to price + freight per order,
-a review with a line break, and a zip prefix with two geolocation rows.
+The Olist rows are referentially consistent so models can be tested end to end, and each one
+exists for a case the models must handle (task 2.1, DATA_CONTRACT §3, ADR-018):
+
+| case | rows |
+|------|------|
+| delivered early / late / on the estimated day (a timestamp after 00:00 of that day) | o1 / o2 / o7 |
+| non-delivered orders: canceled, shipped, created (no approval, no items), invoiced, processing | o3, o6 / o4 / o8 / o9 / o10 |
+| `delivered` status without a customer delivery date; `canceled` with one (both: no metrics) | o5; o6 |
+| repeat customer (two `customer_id`s, one `customer_unique_id`) who moved between orders | u2 = c2 (20040), c7 (22041) |
+| repeat customer at the same address | u1 = c1, c3 |
+| 4-digit zip prefix padded to 5 digits by staging | c8 `1310` → `01310` |
+| prefix with several geolocation rows: exact duplicate, accent variant, a point outside Brazil | 01310 (4 rows; median keeps it in São Paulo) |
+| prefix whose median lies outside Brazil (2 of 3 points in Lisbon): coordinates NULL, `has_invalid_coordinates` | 45000 (no customer or seller uses it) |
+| prefix whose (city, state) pairs tie | 22041 (`copacabana` wins in byte order) |
+| prefix with no geolocation row, only from a customer / a seller | 69900 / 88015 |
+| NULL category; a category with no translation (as `pc_gamer` in the real data) | p4; p5 |
+| a product measure written `1450.0` | p5 |
+| an order with two units of the same product; an order with no items | o7; o8 |
+| duplicate `review_id` on two orders; an order with two reviews; a quoted empty title (`""`) | r1 (o1, o6); o7; r4 |
+| FX: purchase on a publication day / Saturday (carry-forward) / 7 and 8 days after the last rate / before the first rate / outside the range | o1, o5 / o4 / o9, o10 / o6 / o2, o3, o7 |
+| holidays: nationwide public (flagged), regional optional (not flagged), year without BR calendar (NULL) | 2017-10-12, 2017-11-02 / 2017-11-20 / 2018 |
+
+Payments add up to price + freight per order (o8: one `not_defined` payment of 0.00). The exact
+expected outputs of the core rules are in the dbt unit tests
+(`models/core/_core__unit_tests.yml`), which use their own inline rows.
 
 These fixtures are independent of the loader-test fixtures in `tests/olist/fixtures/`. Extend
 them when a model needs a new case, and keep the expectations in the model tests in sync.

@@ -1,0 +1,263 @@
+# Olist star schema (task 2.1, DATA_CONTRACT §3 "core models", ADR-018). Tables in schema core.
+# Keys: Olist natural keys (32-hex ids, 5-digit zip prefixes) and the calendar date itself.
+# Tests: grain uniqueness, not-null keys, fact -> dim relationships, accepted statuses, and
+# row-count reconciliation against raw (equal_row_count). Singular tests in tests/core/.
+version: 2
+
+models:
+  - name: dim_date
+    description: >
+      Grain: one row per calendar day (date_day), whole years spanning every Olist order
+      timestamp (real: 2016-01-01..2018-12-31, 1,096 rows). is_br_public_holiday = nationwide
+      Brazilian public holiday (Nager.Date global and type Public); NULL in a year with no BR
+      holiday calendar loaded.
+    columns:
+      - name: date_day
+        data_tests: [not_null, unique]
+      - name: calendar_year
+        data_tests: [not_null]
+      - name: iso_day_of_week
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7]
+                quote: false
+      - name: is_weekend
+        data_tests: [not_null]
+
+  - name: dim_geo
+    description: >
+      Grain: one row per 5-digit zip code prefix seen in geolocation, customers or sellers
+      (real: ~19.2k rows). lat/lng = per-axis median of the prefix's geolocation points;
+      city/state = most frequent (city, state) pair, ties by byte order; prefixes without
+      geolocation take city/state from customers/sellers and have NULL lat/lng (ADR-018).
+      has_invalid_coordinates flags prefixes whose median lies outside Brazil's bounding box;
+      their lat/lng are NULL.
+    columns:
+      - name: zip_code_prefix
+        data_tests:
+          - not_null
+          - unique
+          - matches_regex:
+              arguments:
+                pattern: '^[0-9]{5}$'
+      - name: state
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [AC, AL, AP, AM, BA, CE, DF, ES, GO, MA, MT, MS, MG, PA, PB, PR, PE, PI, RJ, RN, RS, RO, RR, SC, SP, SE, TO]
+      - name: city
+        data_tests: [not_null]
+      - name: geolocation_rows
+        data_tests: [not_null, not_negative]
+      - name: has_geolocation
+        data_tests: [not_null]
+      - name: has_invalid_coordinates
+        data_tests: [not_null]
+
+  - name: dim_customer
+    description: >
+      Grain: one row per person (customer_unique_id; real: 96,096 rows). Olist issues a new
+      customer_id per order, so repeat-customer analysis counts customer_unique_id. Location =
+      the customer_id row of the latest purchase.
+    data_tests:
+      - equal_row_count:
+          arguments:
+            compare_model: source('olist', 'customers')
+            compare_column: customer_unique_id
+    columns:
+      - name: customer_unique_id
+        data_tests: [not_null, unique]
+      - name: customer_zip_code_prefix
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_geo')
+                field: zip_code_prefix
+      - name: customer_id_count
+        data_tests: [not_null, positive]
+
+  - name: dim_seller
+    description: "Grain: one row per seller (seller_id; real: 3,095 rows)."
+    data_tests:
+      - equal_row_count:
+          arguments:
+            compare_model: source('olist', 'sellers')
+    columns:
+      - name: seller_id
+        data_tests: [not_null, unique]
+      - name: seller_zip_code_prefix
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_geo')
+                field: zip_code_prefix
+
+  - name: dim_product
+    description: >
+      Grain: one row per product (product_id; real: 32,951 rows). English category NULL when
+      the product has no category or the category has no translation.
+    data_tests:
+      - equal_row_count:
+          arguments:
+            compare_model: source('olist', 'products')
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+      - name: has_category_translation
+        data_tests: [not_null]
+
+  - name: fact_order_items
+    description: >
+      Grain: one row per order item (order_id, order_item_id) = every raw_olist.order_items
+      record (real: 112,650 rows). BRL amounts plus EUR at the latest ECB rate on or before the
+      purchase date (7-day look-back; NULL outside the loaded rate range).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, order_item_id]
+      - equal_row_count:
+          arguments:
+            compare_model: source('olist', 'order_items')
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fact_deliveries')
+                field: order_id
+      - name: order_item_id
+        data_tests: [not_null, positive]
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_product')
+                field: product_id
+      - name: seller_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_seller')
+                field: seller_id
+      - name: customer_unique_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_unique_id
+      - name: customer_id
+        data_tests: [not_null]
+      - name: customer_zip_code_prefix
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_geo')
+                field: zip_code_prefix
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [approved, canceled, created, delivered, invoiced, processing, shipped, unavailable]
+      - name: purchase_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: price_brl
+        data_tests: [not_null, positive]
+      - name: freight_value_brl
+        data_tests: [not_null, not_negative]
+      - name: item_total_brl
+        data_tests: [not_null, positive]
+      - name: brl_per_eur
+        data_tests: [positive]
+
+  - name: fact_deliveries
+    description: >
+      Grain: one row per order (order_id) = every raw_olist.orders record, any status (real:
+      99,441 rows). Delivery metrics (delivery_days, delay_days, is_on_time) only where
+      is_delivered (status delivered and a customer delivery timestamp).
+    data_tests:
+      - equal_row_count:
+          arguments:
+            compare_model: source('olist', 'orders')
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests: [not_null, unique]
+      - name: customer_unique_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_unique_id
+      - name: customer_zip_code_prefix
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_geo')
+                field: zip_code_prefix
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [approved, canceled, created, delivered, invoiced, processing, shipped, unavailable]
+      - name: purchase_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: approved_date
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: delivered_carrier_date
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: delivered_customer_date
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: estimated_delivery_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: is_delivered
+        data_tests: [not_null]
+      - name: delivery_days
+        description: >
+          Calendar days from purchase to customer delivery. A negative value would be a source
+          error; it warns rather than failing the build.
+        data_tests:
+          - not_negative:
+              config:
+                severity: warn
