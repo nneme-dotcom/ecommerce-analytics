@@ -79,7 +79,7 @@ warehouse/fixtures/README.md, warehouse/README.md, warehouse/dbt_project.yml,
 tests/warehouse/test_fixture_db.py (orders count read from the fixture plan),
 docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-018), docs/PLAN.md, docs/PROGRESS.md
 
-**Review round 1 (2026-11-05, PR #15 approved with three findings, all fixed; not committed).**
+**Review round 1 (2026-11-05, PR #15 approved with three findings, fixed in 2e528c1; round 2 APPROVE with a real-data re-run: PASS=222 WARN=0, 7 prefixes flagged).**
 Real-data results the reviewer measured before the fix (counts only): `dim_date` 1,096,
 `dim_customer` 96,096, `dim_seller` 3,095, `dim_product` 32,951, `fact_order_items` 112,650,
 `fact_deliveries` 99,441 (as expected); `dbt build` **PASS=220 WARN=1** (the geo bounding-box
@@ -105,7 +105,7 @@ Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, port 526
 afterwards): `ruff check .` clean; `fixture_db load` → `dbt build` **PASS=222 WARN=0 ERROR=0**
 (199 data tests: + `has_invalid_coordinates` not null) → `fixture_db check` ok; `pytest
 tests/warehouse` 37 passed; full `pytest` 399 passed, 2 skipped. Expected on real data:
-PASS=222 WARN=0, with ≤ 8 prefixes flagged (8 if none of them lies between lng −34 and −28).
+PASS=222 WARN=0, with 7 prefixes flagged (measured in review round 2; the 8th, near Fernando de Noronha, is kept).
 **Facts for 2.3 (from the reviewer, real data), not errors in 2.1:** 35 sellers' `seller_state`
 differs from their prefix's `dim_geo.state`; 166 orders have `delivered_carrier_at` before
 `purchased_at`; 775 orders have no items and 1 has no payment; 174 zip prefixes have a tied

@@ -5,7 +5,7 @@
     exists in the 7 days up to its purchase date. Returns the offending items with the reason.
 
     Cost: the expected rate date depends only on the purchase date, so it is computed once per
-    distinct purchase_date (real data: ~630 days x ~600 rates) and then joined to the items on
+    distinct purchase_date (real data: ~630 days x ~2,640 rates) and then joined to the items on
     equality. Joining every item to the rate range directly is a nested loop over
     112,650 items x all rates (10.5 s on the real data, review round 1).
 -#}

@@ -585,7 +585,7 @@ row per prefix found in geolocation, customers or sellers, with a deterministic 
   bounds included; the eastern bound keeps the oceanic islands such as Fernando de Noronha,
   prefix 53990, longitude ≈ −32.4), most of the prefix's points are wrong and the median cannot
   fix them: `latitude` / `longitude` are **NULL** and `has_invalid_coordinates` is true (real
-  data: at most 8 prefixes; city / state are kept). `has_invalid_coordinates` is false everywhere
+  data: 7 prefixes, measured 2026-11-05; city / state are kept). `has_invalid_coordinates` is false everywhere
   else, including prefixes without geolocation. A map or distance metric uses rows with
   non-NULL coordinates; `has_geolocation and latitude is null` = coordinates discarded;
 - `city` / `state` = the **most frequent (city, state) pair** among the prefix's geolocation rows;

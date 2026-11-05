@@ -5,7 +5,7 @@
 --     computed separately per axis; robust to the few points far outside Brazil.
 --   has_invalid_coordinates = the prefix has geolocation points but their median lies outside
 --     Brazil's bounding box (macro inside_brazil_bbox; most of its points are bad, so the median
---     cannot fix it; real data: at most 8 prefixes). Its latitude / longitude are then
+--     cannot fix it; real data: 7 prefixes). Its latitude / longitude are then
 --     NULL, so no map or distance uses them; city / state are kept.
 --   city / state = the most frequent (city, state) pair among the prefix's geolocation rows;
 --     ties -> lowest state, then lowest city, in byte order (COLLATE "C", so the result does not
