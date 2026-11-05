@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.1 Olist star schema `in review` (branch `warehouse/olist-star`, PR #15 approved after the reviewer's real-data validation; review round 1 fixes ready; a `daily` warehouse run after merge should show WARN=0), then 2.2. 2.6 closes after the first chained `daily` run succeeds and the job summary's `pg_database_size` is read. 1.3 is at 1 of 3 *scheduled* successes (2026-11-04, fired 13:06 UTC, ~8 h late; the 2026-11-03 success was a manual dispatch). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** 2.2 ML price-history model. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,17 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-05 — orchestrator — 2.1 live on Neon
+Done: PR #15 merged (67c1073) after two review rounds, both with a dbt build on the real Olist data
+in a throwaway database (PASS=222 WARN=0, 7 prefixes with `has_invalid_coordinates`). Manual
+`mode=daily` run 42112919312 on Neon: ML 0 days loaded / 3 unchanged, `dbt build` PASS=222 WARN=0
+ERROR=0 on the real data. PLAN 2.1 → done.
+The first chained `daily` run (42035192719, after scheduled snapshot 42034833284 on 2026-11-05 at
+13:20 UTC) succeeded and loaded only `raw_mercadolibre` (Olist/enrichment skipped). 1.3: 2 of 3
+scheduled successes.
+Not done / open: 2.6 needs `pg_database_size` read from a job summary (owner, Actions UI).
+Files touched: docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-05 — analytics-engineer — 2.1 (branch `warehouse/olist-star`)
 Done: contract first (DATA_CONTRACT §3 "staging models" and "core models": grain, columns, types,
