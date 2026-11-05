@@ -428,7 +428,7 @@ Detailed tables are defined in tasks 2.1–2.3.
 | schema | written by | materialisation | contents |
 |--------|-----------|-----------------|----------|
 | `raw_olist`, `raw_enrichment` (`raw_mercadolibre` from 2.5) | Python loaders only | tables | §1b, §2, §2b; dbt reads them as **sources** and never writes to them |
-| `staging` | dbt (`warehouse/models/staging/`) | views | one model per raw entity: typed, renamed, deduplicated |
+| `staging` | dbt (`warehouse/models/staging/`) | views | one model per raw entity: typed, renamed, cleaned; one row per raw record (aggregation to a coarser grain, e.g. geolocation, happens in `core`) |
 | `core` | dbt (`warehouse/models/core/`) | tables | star schema (2.1, 2.2) |
 | `marts` | dbt (`warehouse/models/marts/`) | tables | metrics (2.3, §4); the only schema the 2.4 API reads |
 
@@ -488,11 +488,157 @@ fields, `source` = `Nager.Date v3` (fails on the v4 migration until staging is u
 Both `_load_audit` tables: unique (`load_id`, `table_name`), not null, `table_name` in the
 loader's tables.
 
-### `staging` models
+### `staging` models (task 2.1)
 
-| model | grain | columns | notes |
-|-------|-------|---------|-------|
-| `stg_olist__product_category_translation` | one row per `product_category_name` | `product_category_name` text, `product_category_name_english` text | from `raw_olist.product_category_name_translation`, unchanged; tests: `product_category_name` unique + not null, English name not null. Task 2.0 smoke model |
+Views, one per raw table, **one row per raw record** (no filter, no dedup, no join). Rules, the
+same for every Olist model:
+- **Empty string → NULL** on every column (`nullif(col, '')`): raw keeps a quoted `""` as `''`
+  (§2), e.g. an empty review title.
+- **Types:** ids and names `text`; timestamps `timestamp` (without time zone: Olist times are
+  local Brazilian time and carry no offset); money `numeric` (BRL, exact); counts and
+  measures `integer` (product measures are cast through `numeric`, so `40.0` loads);
+  lat/lng `double precision`.
+- **Renames:** only the upstream typos `product_name_lenght` → `product_name_length` and
+  `product_description_lenght` → `product_description_length`; every other column keeps its §2
+  name. Descriptive names (`*_at`, `*_brl`) start in `core`.
+- **Zip prefixes** (`customer_`/`seller_`/`geolocation_zip_code_prefix`): a value shorter than 5
+  characters is left-padded with zeros (macro `zip_prefix`; never truncated) and every value
+  is tested against `^[0-9]{5}$`. The real CSVs already have 5 digits; this protects the joins.
+- No business logic: statuses, NULL timestamps and NULL categories pass through as they are.
+
+| model | grain (key) | columns (type) | tests |
+|-------|-------------|----------------|-------|
+| `stg_olist__customers` | `customer_id` | `customer_id`, `customer_unique_id`, `customer_zip_code_prefix`, `customer_city`, `customer_state` (all text) | `customer_id` unique + not null; `customer_unique_id`, city not null; zip format; state in the 27 UF codes |
+| `stg_olist__geolocation` | none: one row per raw record (many rows per prefix, exact duplicates) | `geolocation_zip_code_prefix` text, `geolocation_lat`, `geolocation_lng` double precision, `geolocation_city`, `geolocation_state` text | all not null; zip format; state in the 27 UF codes |
+| `stg_olist__order_items` | (`order_id`, `order_item_id`) | `order_id`, `order_item_id` integer, `product_id`, `seller_id`, `shipping_limit_date` timestamp, `price`, `freight_value` numeric | key unique; all not null; `order_item_id`, `price` > 0; `freight_value` ≥ 0 |
+| `stg_olist__order_payments` | (`order_id`, `payment_sequential`) | `order_id`, `payment_sequential` integer, `payment_type`, `payment_installments` integer, `payment_value` numeric | key unique; not null; `order_id` → `stg_olist__orders`; `payment_type` in (`credit_card`, `boleto`, `voucher`, `debit_card`, `not_defined`); installments, value ≥ 0 |
+| `stg_olist__order_reviews` | (`review_id`, `order_id`): `review_id` alone is **not** unique, and an order can have several reviews | `review_id`, `order_id`, `review_score` integer, `review_comment_title`, `review_comment_message`, `review_creation_date`, `review_answer_timestamp` timestamp | key unique; `review_id`, `order_id`, creation date not null; `order_id` → orders; score in 1–5 |
+| `stg_olist__orders` | `order_id` | `order_id`, `customer_id`, `order_status`, `order_purchase_timestamp`, `order_approved_at`, `order_delivered_carrier_date`, `order_delivered_customer_date`, `order_estimated_delivery_date` (timestamps; the estimate is a date at 00:00) | `order_id` unique + not null; `customer_id` unique (one per order) + not null + → customers; status in (`approved`, `canceled`, `created`, `delivered`, `invoiced`, `processing`, `shipped`, `unavailable`); purchase and estimate not null |
+| `stg_olist__products` | `product_id` | `product_id`, `product_category_name` (NULL for some), `product_name_length`, `product_description_length`, `product_photos_qty`, `product_weight_g`, `product_length_cm`, `product_height_cm`, `product_width_cm` (integer) | `product_id` unique + not null; measures ≥ 0 |
+| `stg_olist__sellers` | `seller_id` | `seller_id`, `seller_zip_code_prefix`, `seller_city`, `seller_state` (text) | `seller_id` unique + not null; zip format; city not null; state in the 27 UF codes |
+| `stg_olist__product_category_translation` | `product_category_name` | `product_category_name`, `product_category_name_english` (text) | name unique + not null, English not null. The loader already strips the CSV's BOM |
+| `stg_enrichment__fx_rates` | (`rate_date`, `base_currency`, `quote_currency`) | `rate_date` date, `base_currency`, `quote_currency` text, `rate` numeric | key unique; not null; base = `EUR`; `rate` > 0. No rows on weekends/TARGET holidays (carry-forward is in `core`) |
+| `stg_enrichment__public_holidays` | none: one row per raw entry | `country_code` text, `holiday_date` date, `local_name`, `holiday_name` (= raw `name`), `is_global`, `counties`, `holiday_types`, `is_fixed`, `launch_year` | required fields not null |
+
+### `core` models — Olist star schema (task 2.1, ADR-018)
+
+Tables. **Keys are Olist's natural keys** (32-hex ids, 5-digit zip prefixes) and the calendar
+date itself (`date`), used the same way in every fact and dimension; no surrogate keys (ADR-018).
+Row counts below are the expected ones on the full real load (from the §2 counts and the
+public dataset's known distinct counts); the reconciliation tests enforce the ones derived from
+raw.
+
+| model | grain (key) | expected real rows | built from |
+|-------|-------------|--------------------|------------|
+| `dim_date` | `date_day` | 1,096 (2016-01-01 .. 2018-12-31) | order timestamps, `stg_enrichment__public_holidays` |
+| `dim_customer` | `customer_unique_id` | 96,096 | customers + orders |
+| `dim_seller` | `seller_id` | 3,095 | sellers |
+| `dim_product` | `product_id` | 32,951 | products + translation |
+| `dim_geo` | `zip_code_prefix` | ≈ 19.2k (19,015 geolocation prefixes + the customer/seller prefixes geolocation lacks) | geolocation (1,000,163 rows), customers, sellers |
+| `fact_order_items` | (`order_id`, `order_item_id`) | 112,650 (= raw `order_items`) | order items + orders + customers + FX |
+| `fact_deliveries` | `order_id` | 99,441 (= raw `orders`) | orders + customers |
+
+Storage: ≈ 80 MB for all of `core` (the facts dominate), against ≈ 0.3 GB raw (ADR-014). Raw
+geolocation is never copied into `core`.
+
+**`dim_date`**: every day from 1 January of the first year to 31 December of the last year in
+which any of the five order timestamps falls. Columns: `date_day` date, `iso_year`,
+`calendar_year`, `calendar_quarter`, `calendar_month` integer, `year_month` text (`YYYY-MM`),
+`month_name` text (English), `iso_week`, `iso_day_of_week` integer (1 = Monday), `day_name` text
+(English), `is_weekend` boolean, `is_br_public_holiday` boolean, `br_holiday_name` text.
+`is_br_public_holiday` is true on a **nationwide public holiday**: a `BR` entry with
+`is_global` and `'Public' = any(holiday_types)` (regional entries with `counties`, and
+Optional/Bank/Observance types, never count); names of several entries on one date are joined
+with `; `. It is **NULL in a year with no BR row** in the holiday calendar (unknown, not false;
+BR is loaded for 2016–2018). Tests: `date_day` unique + not null; contiguous whole years;
+the flag follows the calendar rule (singular `assert_dim_date_holiday_flag_matches_calendar`).
+
+**`dim_customer`**: `customer_unique_id` text, `customer_zip_code_prefix`, `customer_city`,
+`customer_state` text, `customer_id_count` bigint, `first_purchase_at`, `last_purchase_at`
+timestamp. **`customer_id` vs `customer_unique_id`:** Olist issues a new `customer_id` for every
+order (customers : orders = 1 : 1), so a person who orders twice has two `customer_id`s and one
+`customer_unique_id`. Repeat-customer, retention and cohort metrics must count
+`customer_unique_id`; counting `customer_id` makes every customer a one-time buyer. The facts
+join this dimension on `customer_unique_id` and keep `customer_id` as a degenerate attribute.
+Location = the `customer_id` row of the person's latest purchase (tie, or no order: lowest
+`customer_id` in byte order); the location at the time of each order is the facts'
+`customer_zip_code_prefix`. `customer_id_count` = number of `customer_id`s (= orders placed,
+any status); first/last purchase over orders of any status (NULL if none). Tests: key unique +
+not null; zip → `dim_geo`; count > 0; rows = distinct raw `customer_unique_id`.
+
+**`dim_seller`**: `seller_id`, `seller_zip_code_prefix`, `seller_city`, `seller_state` (text).
+Tests: key unique + not null; zip → `dim_geo`; rows = raw `sellers`.
+
+**`dim_product`**: `product_id`, `product_category_name`, `product_category_name_english` text,
+`has_category_translation` boolean, then the seven integer measures of staging.
+`product_category_name_english` is NULL when the product has no category (610 real products)
+or its category has no translation (2 real categories: `pc_gamer`,
+`portateis_cozinha_e_preparadores_de_alimentos`); no label is invented. Tests: key unique + not
+null; `has_category_translation` not null; rows = raw `products`.
+
+**`dim_geo`**: `zip_code_prefix` text, `city`, `state` text, `latitude`, `longitude` double
+precision, `geolocation_rows` bigint, `has_geolocation` boolean. One row per prefix found in
+geolocation, customers or sellers, with a deterministic rule (ADR-018):
+- `latitude` / `longitude` = **median** (`percentile_cont(0.5)`) of the prefix's geolocation
+  points, per axis (robust to the few raw points far outside Brazil);
+- `city` / `state` = the **most frequent (city, state) pair** among the prefix's geolocation rows;
+  ties → lowest `state`, then lowest `city`, in byte order (`COLLATE "C"`, independent of the
+  database collation). City spellings are kept as written (accent variants are different values);
+- a prefix with **no geolocation row** takes the most frequent pair among the customers' and
+  sellers' rows with that prefix (same tie rule), with NULL coordinates and
+  `has_geolocation = false`.
+Tests: key unique + not null + 5-digit format; state in the 27 UF codes; city not null;
+covers exactly the source prefixes (singular `assert_dim_geo_covers_every_zip_prefix`); median
+point inside Brazil's bounding box (warning only).
+
+**`fact_order_items`**: `order_id`, `order_item_id` integer, `product_id`, `seller_id`,
+`customer_unique_id`, `customer_id`, `customer_zip_code_prefix`, `order_status` (text),
+`order_purchased_at` timestamp, `purchase_date` date, `shipping_limit_at` timestamp,
+`price_brl`, `freight_value_brl`, `item_total_brl` (= price + freight) numeric, `fx_rate_date`
+date, `brl_per_eur`, `price_eur`, `freight_value_eur`, `item_total_eur` numeric.
+Every item of every order status is kept (filter by `order_status` downstream).
+**FX (ADR-018):** `brl_per_eur` = the latest ECB EUR→BRL rate (`stg_enrichment__fx_rates`,
+quote `BRL`) with `rate_date` on or before `purchase_date`, looking back **at most 7 calendar
+days** (ECB gaps are weekends and TARGET holidays, at most 4 days); `fx_rate_date` is that
+`rate_date`. EUR amount = BRL amount / `brl_per_eur`, rounded to 4 decimals. Outside the loaded
+rate range, or past the look-back, the rate, `fx_rate_date` and the EUR columns are NULL
+together. Caveats: one rate per purchase day (not the payment or delivery day); ECB reference
+rates, not the rate a customer paid. Tests: key unique; keys not null; `product_id` →
+`dim_product`, `seller_id` → `dim_seller`, `customer_unique_id` → `dim_customer`,
+`customer_zip_code_prefix` → `dim_geo`, `purchase_date` → `dim_date`, `order_id` →
+`fact_deliveries`; status accepted values (as staging); price > 0, freight ≥ 0; **rows = raw
+`order_items`**; EUR never NULL for a purchase date inside [first, last] BRL `rate_date`; the
+rate is the latest in the look-back (both singular).
+
+**`fact_deliveries`**: `order_id`, `customer_id`, `customer_unique_id`,
+`customer_zip_code_prefix`, `order_status` (text); `purchased_at`, `approved_at`,
+`delivered_carrier_at`, `delivered_customer_at`, `estimated_delivery_at` timestamp; their dates
+`purchase_date`, `approved_date`, `delivered_carrier_date`, `delivered_customer_date`,
+`estimated_delivery_date` (date, FK → `dim_date`); `is_delivered` boolean, `delivery_days`,
+`delay_days` integer, `is_on_time` boolean. One row per order **whatever its status**; the
+timestamps are as in raw (a canceled order may carry a delivery timestamp). Delivery metrics,
+**only where `is_delivered`**, else NULL:
+
+| column | definition |
+|--------|------------|
+| `is_delivered` | `order_status = 'delivered'` and `delivered_customer_at` is not null |
+| `delivery_days` | `delivered_customer_date - purchase_date` (whole calendar days) |
+| `delay_days` | `delivered_customer_date - estimated_delivery_date` (negative = early, 0 = on the estimated day) |
+| `is_on_time` | `delivered_customer_date <= estimated_delivery_date` |
+
+Dates, not timestamps: Olist's estimate is a date (stored at 00:00), so comparing timestamps
+would make every delivery on the estimated day late. Tests: `order_id` and `customer_id` unique
++ not null; `customer_unique_id` → `dim_customer`, zip → `dim_geo`, the five dates →
+`dim_date`; status accepted values; `is_delivered` not null; **rows = raw `orders`**; metrics
+follow the table above and are NULL for non-delivered orders (singular); `delivery_days` ≥ 0
+(warning only).
+
+**Unit tests** (`warehouse/models/core/_core__unit_tests.yml`, run by `dbt build`): exact
+outputs for the `dim_geo` rule, the FX carry-forward and look-back, the delivery metrics and
+`dim_customer`'s grain and location. **Generic tests** in `warehouse/tests/generic/`:
+`unique_combination_of_columns`, `positive`, `not_negative`, `matches_regex`, `equal_row_count`
+(row-count reconciliation, optionally against a distinct count). Singular tests in
+`warehouse/tests/core/`.
 
 ---
 

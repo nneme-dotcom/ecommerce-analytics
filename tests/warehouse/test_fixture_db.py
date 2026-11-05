@@ -83,7 +83,10 @@ def test_inventory_covers_columns_rows_and_md5(loaded):
     orders = json.loads(loaded.read_text())["relations"]["raw_olist.orders"]
     assert orders["kind"] == "r"
     assert orders["columns"][0] == ["order_id", "text"]
-    assert orders["rows"] == 3
+    # The fixture orders grow with each modelling task (ADR-016); count them from the plan.
+    expected = fixture_db.prepare_fixtures().expected_rows()["raw_olist.orders"]
+    assert expected >= 3
+    assert orders["rows"] == expected
     assert len(orders["md5"]) == 32
 
 

@@ -1,0 +1,44 @@
+# Enrichment staging views (DATA_CONTRACT §3 "staging models"). Raw is already typed (§2b);
+# these views select and rename only.
+version: 2
+
+models:
+  - name: stg_enrichment__fx_rates
+    description: >
+      Grain: one row per ECB publication day and quote currency (rate_date, quote_currency),
+      base EUR. No rows on weekends or TARGET holidays (carry-forward happens in
+      core.fact_order_items).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [rate_date, base_currency, quote_currency]
+    columns:
+      - name: rate_date
+        data_tests: [not_null]
+      - name: base_currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [EUR]
+      - name: quote_currency
+        data_tests: [not_null]
+      - name: rate
+        description: Units of quote currency per 1 EUR.
+        data_tests: [not_null, positive]
+
+  - name: stg_enrichment__public_holidays
+    description: >
+      Grain: one row per raw_enrichment.public_holidays entry (no key). All types and regional
+      entries kept; core.dim_date keeps nationwide public holidays only.
+    columns:
+      - name: country_code
+        data_tests: [not_null]
+      - name: holiday_date
+        data_tests: [not_null]
+      - name: holiday_name
+        data_tests: [not_null]
+      - name: is_global
+        data_tests: [not_null]
+      - name: holiday_types
+        data_tests: [not_null]

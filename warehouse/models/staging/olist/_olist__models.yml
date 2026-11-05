@@ -1,10 +1,206 @@
+# Olist staging views (DATA_CONTRACT §3 "staging models"). One model per raw_olist table: typed,
+# empty strings -> NULL, *_lenght -> *_length, zip prefixes 5 digits. No business logic.
+# Key tests live here (raw has no keys); fact -> dim relationships are tested in core.
 version: 2
 
 models:
+  - name: stg_olist__customers
+    description: >
+      Grain: one row per customer_id (= one raw_olist.customers record). customer_id is issued
+      per order; customer_unique_id is the person (see core.dim_customer).
+    columns:
+      - name: customer_id
+        data_tests: [not_null, unique]
+      - name: customer_unique_id
+        data_tests: [not_null]
+      - name: customer_zip_code_prefix
+        data_tests:
+          - not_null
+          - matches_regex:
+              arguments:
+                pattern: '^[0-9]{5}$'
+      - name: customer_city
+        data_tests: [not_null]
+      - name: customer_state
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: &br_states [AC, AL, AP, AM, BA, CE, DF, ES, GO, MA, MT, MS, MG, PA, PB, PR, PE, PI, RJ, RN, RS, RO, RR, SC, SP, SE, TO]  # 26 states + DF
+
+  - name: stg_olist__geolocation
+    description: >
+      Grain: one row per raw_olist.geolocation record. Not unique: a zip prefix has many rows
+      (and exact duplicates); core.dim_geo aggregates to one row per prefix.
+    columns:
+      - name: geolocation_zip_code_prefix
+        data_tests:
+          - not_null
+          - matches_regex:
+              arguments:
+                pattern: '^[0-9]{5}$'
+      - name: geolocation_lat
+        data_tests: [not_null]
+      - name: geolocation_lng
+        data_tests: [not_null]
+      - name: geolocation_city
+        data_tests: [not_null]
+      - name: geolocation_state
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *br_states
+
+  - name: stg_olist__order_items
+    description: >
+      Grain: one row per order item (order_id, order_item_id) = one raw_olist.order_items
+      record. Amounts in BRL.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, order_item_id]
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+      - name: order_item_id
+        data_tests: [not_null, positive]
+      - name: product_id
+        data_tests: [not_null]
+      - name: seller_id
+        data_tests: [not_null]
+      - name: shipping_limit_date
+        data_tests: [not_null]
+      - name: price
+        data_tests: [not_null, positive]
+      - name: freight_value
+        data_tests: [not_null, not_negative]
+
+  - name: stg_olist__order_payments
+    description: >
+      Grain: one row per payment of an order (order_id, payment_sequential) = one
+      raw_olist.order_payments record. Amounts in BRL. Not used by the 2.1 star schema (task 2.3).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, payment_sequential]
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: payment_sequential
+        data_tests: [not_null, positive]
+      - name: payment_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [credit_card, boleto, voucher, debit_card, not_defined]
+      - name: payment_installments
+        data_tests: [not_null, not_negative]
+      - name: payment_value
+        data_tests: [not_null, not_negative]
+
+  - name: stg_olist__order_reviews
+    description: >
+      Grain: one row per (review_id, order_id) = one raw_olist.order_reviews record. review_id
+      alone is not unique (one review can be attached to several orders) and an order can have
+      several reviews. Not used by the 2.1 star schema (task 2.3, review impact).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [review_id, order_id]
+    columns:
+      - name: review_id
+        data_tests: [not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: review_score
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+      - name: review_creation_date
+        data_tests: [not_null]
+
+  - name: stg_olist__orders
+    description: >
+      Grain: one row per order (order_id) = one raw_olist.orders record. Timestamps are local
+      Brazilian time without zone; order_estimated_delivery_date is a date at 00:00:00.
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        description: One customer_id per order in Olist (one to one), hence unique here too.
+        data_tests:
+          - not_null
+          - unique
+          - relationships:
+              arguments:
+                to: ref('stg_olist__customers')
+                field: customer_id
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: &order_statuses [approved, canceled, created, delivered, invoiced, processing, shipped, unavailable]
+      - name: order_purchase_timestamp
+        data_tests: [not_null]
+      - name: order_estimated_delivery_date
+        data_tests: [not_null]
+
+  - name: stg_olist__products
+    description: >
+      Grain: one row per product (product_id) = one raw_olist.products record. Upstream typos
+      renamed (*_lenght -> *_length). Category and text measures are NULL for some products.
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+      - name: product_name_length
+        data_tests: [not_negative]
+      - name: product_description_length
+        data_tests: [not_negative]
+      - name: product_photos_qty
+        data_tests: [not_negative]
+      - name: product_weight_g
+        data_tests: [not_negative]
+
+  - name: stg_olist__sellers
+    description: "Grain: one row per seller (seller_id) = one raw_olist.sellers record."
+    columns:
+      - name: seller_id
+        data_tests: [not_null, unique]
+      - name: seller_zip_code_prefix
+        data_tests:
+          - not_null
+          - matches_regex:
+              arguments:
+                pattern: '^[0-9]{5}$'
+      - name: seller_city
+        data_tests: [not_null]
+      - name: seller_state
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *br_states
+
   - name: stg_olist__product_category_translation
     description: >
       Olist product category names (Portuguese) with their English translation.
-      Grain: one row per product_category_name. View in schema staging.
+      Grain: one row per product_category_name.
     columns:
       - name: product_category_name
         description: Category name as used in raw_olist.products.product_category_name.

@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.1 Olist star schema (now testable on the real load in Neon), then 2.2. 2.6 closes after the first chained `daily` run succeeds and the job summary's `pg_database_size` is read. 1.3 is at 1 of 3 *scheduled* successes (2026-11-04, fired 13:06 UTC, ~8 h late; the 2026-11-03 success was a manual dispatch). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** 2.1 Olist star schema `in review` (branch `warehouse/olist-star`; real-data check after merge with a `daily` warehouse run), then 2.2. 2.6 closes after the first chained `daily` run succeeds and the job summary's `pg_database_size` is read. 1.3 is at 1 of 3 *scheduled* successes (2026-11-04, fired 13:06 UTC, ~8 h late; the 2026-11-03 success was a manual dispatch). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,65 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-05 — analytics-engineer — 2.1 (branch `warehouse/olist-star`)
+Done: contract first (DATA_CONTRACT §3 "staging models" and "core models": grain, columns, types,
+keys, tests, expected real row counts). **staging** (views, one row per raw record): the eight
+missing Olist models (`customers`, `geolocation`, `order_items`, `order_payments`,
+`order_reviews`, `orders`, `products`, `sellers`) + `stg_enrichment__fx_rates` /
+`__public_holidays`; `nullif(col, '')` everywhere, casts, `*_lenght` → `*_length`, zip prefixes
+padded to 5 digits when shorter (macro `zip_prefix`, never truncates) and tested against
+`^[0-9]{5}$`. Reviews grain = (`review_id`, `order_id`). **core** (tables): `dim_date` (whole
+years spanning the five order timestamps; `is_br_public_holiday` = BR, `is_global`, type `Public`;
+NULL in a year with no BR calendar), `dim_customer` (grain `customer_unique_id`; latest-purchase
+location; `customer_id` vs `customer_unique_id` documented), `dim_seller`, `dim_product` (English
+category, `has_category_translation`), `dim_geo` (one row per prefix from geolocation ∪ customers ∪
+sellers; per-axis median lat/lng; most frequent (city, state) pair, ties byte order; fallback
+for prefixes without geolocation), `fact_order_items` (BRL + EUR at the latest ECB EUR→BRL rate on
+or before the purchase date, 7-day look-back, `fx_rate_date`), `fact_deliveries` (one row per
+order, all statuses; `is_delivered`, `delivery_days`, `delay_days`, `is_on_time` by calendar date,
+NULL unless delivered). Natural keys everywhere. ADR-018 (grains, keys, geo rule, FX rule).
+Tests: generic `not_negative`, `matches_regex`, `equal_row_count` (row-count reconciliation:
+items = raw `order_items`, deliveries = raw `orders`, sellers, products, customers = distinct
+`customer_unique_id`); 7 singular tests in `warehouse/tests/core/` (dim_date contiguity and
+holiday rule, dim_geo coverage, FX not NULL inside the rate range, FX = latest rate in the
+look-back, delivery-metric rules; Brazil bounding box as a warning); 4 dbt unit tests (geo rule,
+FX carry-forward/look-back, delivery metrics, dim_customer). Fixtures extended (10 orders, 10
+customer_ids for 8 people, 3 sellers, 5 products, 8 geolocation rows; every case listed in
+`warehouse/fixtures/README.md`); FX/holiday fixtures unchanged (unverifiable here, PLAN 1.11).
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, port 46853, deleted
+afterwards): `ruff check .` clean; `fixture_db load` → `dbt build` **PASS=221** (1 hook, 11 views,
+7 tables, 4 unit tests, 198 data tests; WARN=0 ERROR=0) → `fixture_db check` ok (schemas
+`core`, `staging`; 17 raw relations unchanged); `pytest tests/warehouse` 37 passed; full `pytest`
+399 passed, 2 skipped (Olist real data). Negative check: nine corruptions of the built core tables
+(wrong `fx_rate_date`, a NULL rate inside the range, a deleted item, wrong `delivery_days`, a
+metric on an undelivered order, a deleted `dim_geo` prefix, an unflagged holiday, a missing day,
+a deleted customer) each failed the intended test (10 failures). No Neon connection.
+Expected real row counts: `dim_date` 1,096; `dim_customer` 96,096; `dim_seller` 3,095;
+`dim_product` 32,951; `dim_geo` ≈ 19.2k; `fact_order_items` 112,650; `fact_deliveries` 99,441;
+`core` ≈ 80 MB in total.
+Not done / open: **the real-data check happens after merge**: `gh workflow run warehouse-load.yml
+--ref main -f mode=daily` (runs `dbt build` on Neon); PLAN 2.1 stays `in review` until it is
+green. Assumptions about the real data that only that run proves (from the public dataset's
+known properties, not checked here): (`review_id`, `order_id`) unique; (`order_id`,
+`payment_sequential`) unique; `customer_id` unique in orders; every `*_state` a UF code; zip
+prefixes 5 digits; no empty city; order statuses and payment types as listed; all ids
+referentially complete. If one fails, the failing test names the rule; fix the test or the
+contract, not the data.
+Gotchas for the next agent: every `dbt build` (also each `daily` run) rebuilds all `core` tables
+although Olist is static (ADR-018 consequences; a later task can select only ML models on daily
+runs). dbt unit tests compare numerics as text, so expected EUR values carry the 4-decimal scale
+(`'2.5000'`). Plain YAML descriptions containing `: ` must be quoted (dbt parse error). Count
+people with `customer_unique_id`, never `customer_id`. Payments and reviews have staging models
+but no core fact yet (2.3).
+Files touched: warehouse/models/staging/olist/*.sql + `_olist__models.yml`,
+warehouse/models/staging/enrichment/{stg_enrichment__fx_rates,stg_enrichment__public_holidays}.sql
++ `_enrichment__models.yml` (new), warehouse/models/core/** (new), warehouse/macros/zip_prefix.sql
+(new), warehouse/tests/generic/{not_negative,matches_regex,equal_row_count}.sql (new),
+warehouse/tests/core/*.sql (new), warehouse/fixtures/raw_olist/*.csv (8 of 9),
+warehouse/fixtures/README.md, warehouse/README.md, warehouse/dbt_project.yml,
+tests/warehouse/test_fixture_db.py (orders count read from the fixture plan),
+docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-018), docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-04 — orchestrator — 2.6 first live run
 Done: PR #13 merged (b401a7e). Owner confirmed (in chat; the environments API is not readable from
