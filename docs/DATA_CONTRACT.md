@@ -538,8 +538,8 @@ raw.
 | `fact_order_items` | (`order_id`, `order_item_id`) | 112,650 (= raw `order_items`) | order items + orders + customers + FX |
 | `fact_deliveries` | `order_id` | 99,441 (= raw `orders`) | orders + customers |
 
-Storage: ≈ 80 MB for all of `core` (the facts dominate), against ≈ 0.3 GB raw (ADR-014). Raw
-geolocation is never copied into `core`.
+Storage, measured on the real load: ≈ 70 MB for all of `core` (the facts dominate), whole
+database ≈ 253 MB, against Neon's 1 GB (ADR-014). Raw geolocation is never copied into `core`.
 
 **`dim_date`**: every day from 1 January of the first year to 31 December of the last year in
 which any of the five order timestamps falls. Columns: `date_day` date, `iso_year`,
@@ -577,10 +577,17 @@ or its category has no translation (2 real categories: `pc_gamer`,
 null; `has_category_translation` not null; rows = raw `products`.
 
 **`dim_geo`**: `zip_code_prefix` text, `city`, `state` text, `latitude`, `longitude` double
-precision, `geolocation_rows` bigint, `has_geolocation` boolean. One row per prefix found in
-geolocation, customers or sellers, with a deterministic rule (ADR-018):
+precision, `geolocation_rows` bigint, `has_geolocation`, `has_invalid_coordinates` boolean. One
+row per prefix found in geolocation, customers or sellers, with a deterministic rule (ADR-018):
 - `latitude` / `longitude` = **median** (`percentile_cont(0.5)`) of the prefix's geolocation
   points, per axis (robust to the few raw points far outside Brazil);
+- if that median lies **outside Brazil's bounding box** (latitude −34..6, longitude −74..−28,
+  bounds included; the eastern bound keeps the oceanic islands such as Fernando de Noronha,
+  prefix 53990, longitude ≈ −32.4), most of the prefix's points are wrong and the median cannot
+  fix them: `latitude` / `longitude` are **NULL** and `has_invalid_coordinates` is true (real
+  data: at most 8 prefixes; city / state are kept). `has_invalid_coordinates` is false everywhere
+  else, including prefixes without geolocation. A map or distance metric uses rows with
+  non-NULL coordinates; `has_geolocation and latitude is null` = coordinates discarded;
 - `city` / `state` = the **most frequent (city, state) pair** among the prefix's geolocation rows;
   ties → lowest `state`, then lowest `city`, in byte order (`COLLATE "C"`, independent of the
   database collation). City spellings are kept as written (accent variants are different values);
@@ -588,8 +595,12 @@ geolocation, customers or sellers, with a deterministic rule (ADR-018):
   sellers' rows with that prefix (same tie rule), with NULL coordinates and
   `has_geolocation = false`.
 Tests: key unique + not null + 5-digit format; state in the 27 UF codes; city not null;
-covers exactly the source prefixes (singular `assert_dim_geo_covers_every_zip_prefix`); median
-point inside Brazil's bounding box (warning only).
+covers exactly the source prefixes (singular `assert_dim_geo_covers_every_zip_prefix`);
+`has_invalid_coordinates` not null; every non-NULL point inside the bounding box, latitude and
+longitude NULL together, flagged rows have geolocation and NULL coordinates, unflagged rows have
+coordinates exactly when they have geolocation (singular
+`assert_dim_geo_coordinates_inside_brazil`, an error since review round 1 of 2.1; it was a
+warning that fired permanently on the real data).
 
 **`fact_order_items`**: `order_id`, `order_item_id` integer, `product_id`, `seller_id`,
 `customer_unique_id`, `customer_id`, `customer_zip_code_prefix`, `order_status` (text),
@@ -600,9 +611,10 @@ Every item of every order status is kept (filter by `order_status` downstream).
 **FX (ADR-018):** `brl_per_eur` = the latest ECB EUR→BRL rate (`stg_enrichment__fx_rates`,
 quote `BRL`) with `rate_date` on or before `purchase_date`, looking back **at most 7 calendar
 days** (ECB gaps are weekends and TARGET holidays, at most 4 days); `fx_rate_date` is that
-`rate_date`. EUR amount = BRL amount / `brl_per_eur`, rounded to 4 decimals. Outside the loaded
-rate range, or past the look-back, the rate, `fx_rate_date` and the EUR columns are NULL
-together. Caveats: one rate per purchase day (not the payment or delivery day); ECB reference
+`rate_date`. EUR amount = BRL amount / `brl_per_eur`, rounded to 4 decimals. The rate,
+`fx_rate_date` and the EUR columns are NULL together **before the first rate, or when no rate
+exists on or within 7 days before the purchase date** (so the last loaded rate is carried up to
+7 days past the end of the range, not NULLed at its end). Caveats: one rate per purchase day (not the payment or delivery day); ECB reference
 rates, not the rate a customer paid. Tests: key unique; keys not null; `product_id` →
 `dim_product`, `seller_id` → `dim_seller`, `customer_unique_id` → `dim_customer`,
 `customer_zip_code_prefix` → `dim_geo`, `purchase_date` → `dim_date`, `order_id` →

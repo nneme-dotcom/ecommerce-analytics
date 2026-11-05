@@ -447,12 +447,24 @@ estimate is a date while the delivery is a timestamp.
   from geolocation are kept (customers' and sellers' most frequent pair, NULL coordinates,
   `has_geolocation = false`) so every customer and seller zip has a `dim_geo` row and the
   relationships tests can be strict. City spellings are not normalised (no accent folding):
-  that would be a guess; marts can fold if a metric needs it.
+  that would be a guess; marts can fold if a metric needs it. **Coordinates outside Brazil**
+  (review round 1): when a prefix's median still lies outside a bounding box around Brazil
+  (lat −34..6, lng −74..−28, one macro shared by the model and its test; the eastern bound keeps
+  Fernando de Noronha), its `latitude` / `longitude` are NULLed and `has_invalid_coordinates`
+  is set; city / state stay. Chosen over keeping the coordinates with a flag and a test that
+  skips flagged rows: a wrong point in Europe or the ocean is worse than no point, and a NULL
+  cannot be put on a map by a consumer who forgot the flag. The bounding-box test is now an
+  error (it was a warning that fired permanently on 8 real prefixes, which teaches people to
+  ignore warnings).
 - **FX rule.** BRL→EUR with the latest ECB EUR→BRL rate on or before the purchase date, looking
   back at most **7 days** (the longest ECB gap is 4 days); `fx_rate_date` records which rate.
   Implemented by expanding each rate to the days it covers (window `lead`) and joining on the
-  date, so no range join. NULL outside the loaded range rather than a stale rate. EUR amounts
-  rounded to 4 decimals. A test fails the build if any item inside the rate range has no rate.
+  date, so no range join. NULL before the first rate, or when no rate exists on or within 7 days
+  before the purchase date, rather than an older, stale rate. EUR amounts rounded to 4 decimals.
+  A test fails the build if any item inside the rate range has no rate. The test that re-derives
+  the expected rate computes it once per distinct purchase date (~630) and joins that to the
+  items; joining every item to the rate range was a nested loop of 112,650 items × all rates,
+  10.5 s on the real data and the slowest step of every daily build (review round 1).
 - **Delivery metrics** by calendar date (`delivered_customer_date` vs `estimated_delivery_date`),
   only for `order_status = 'delivered'` with a customer delivery timestamp; otherwise NULL, not 0.
 - **Holiday flag**: nationwide public holidays only (`is_global` and type `Public`); NULL in a
@@ -461,10 +473,13 @@ estimate is a date while the delivery is a timestamp.
   tests in `warehouse/tests/core/`, and dbt **unit tests** for the geo, FX, delivery and
   customer rules (inline inputs; they run as SELECTs during `dbt build`, also on Neon).
 
-**Consequences.** `core` adds ≈ 80 MB on Neon; geolocation is read from the staging view once per
+**Consequences.** `core` adds ≈ 70 MB on Neon (measured; whole database ≈ 253 MB); geolocation
+is read from the staging view once per
 build and never stored twice. `core` tables are fully rebuilt by every `dbt build`, including
 the daily runs, although Olist never changes: that costs a few CU-seconds and some WAL per day;
 if it matters, a later task can select only the ML models on `daily` runs or make the Olist
 models incremental. Any marts that need a person-level count must use `customer_unique_id`.
-Items outside the FX range (none in the real Olist range, 2016-09-04 .. 2018-10-17, against FX
-from 2016-09-01) have NULL EUR amounts.
+Items with no rate on or within 7 days before their purchase date (none in the real Olist range,
+2016-09-04 .. 2018-10-17, against FX from 2016-09-01) have NULL EUR amounts. Prefixes with
+`has_invalid_coordinates` drop out of any map or distance metric; their orders still count in
+every other metric.

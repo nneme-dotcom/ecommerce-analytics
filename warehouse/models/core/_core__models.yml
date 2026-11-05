@@ -32,6 +32,8 @@ models:
       (real: ~19.2k rows). lat/lng = per-axis median of the prefix's geolocation points;
       city/state = most frequent (city, state) pair, ties by byte order; prefixes without
       geolocation take city/state from customers/sellers and have NULL lat/lng (ADR-018).
+      has_invalid_coordinates flags prefixes whose median lies outside Brazil's bounding box;
+      their lat/lng are NULL.
     columns:
       - name: zip_code_prefix
         data_tests:
@@ -51,6 +53,8 @@ models:
       - name: geolocation_rows
         data_tests: [not_null, not_negative]
       - name: has_geolocation
+        data_tests: [not_null]
+      - name: has_invalid_coordinates
         data_tests: [not_null]
 
   - name: dim_customer

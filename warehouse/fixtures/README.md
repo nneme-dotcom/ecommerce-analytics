@@ -31,6 +31,7 @@ exists for a case the models must handle (task 2.1, DATA_CONTRACT §3, ADR-018):
 | repeat customer at the same address | u1 = c1, c3 |
 | 4-digit zip prefix padded to 5 digits by staging | c8 `1310` → `01310` |
 | prefix with several geolocation rows: exact duplicate, accent variant, a point outside Brazil | 01310 (4 rows; median keeps it in São Paulo) |
+| prefix whose median lies outside Brazil (2 of 3 points in Lisbon): coordinates NULL, `has_invalid_coordinates` | 45000 (no customer or seller uses it) |
 | prefix whose (city, state) pairs tie | 22041 (`copacabana` wins in byte order) |
 | prefix with no geolocation row, only from a customer / a seller | 69900 / 88015 |
 | NULL category; a category with no translation (as `pc_gamer` in the real data) | p4; p5 |

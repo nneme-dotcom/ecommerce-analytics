@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.1 Olist star schema `in review` (branch `warehouse/olist-star`; real-data check after merge with a `daily` warehouse run), then 2.2. 2.6 closes after the first chained `daily` run succeeds and the job summary's `pg_database_size` is read. 1.3 is at 1 of 3 *scheduled* successes (2026-11-04, fired 13:06 UTC, ~8 h late; the 2026-11-03 success was a manual dispatch). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** 2.1 Olist star schema `in review` (branch `warehouse/olist-star`, PR #15 approved after the reviewer's real-data validation; review round 1 fixes ready; a `daily` warehouse run after merge should show WARN=0), then 2.2. 2.6 closes after the first chained `daily` run succeeds and the job summary's `pg_database_size` is read. 1.3 is at 1 of 3 *scheduled* successes (2026-11-04, fired 13:06 UTC, ~8 h late; the 2026-11-03 success was a manual dispatch). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -78,6 +78,46 @@ warehouse/tests/core/*.sql (new), warehouse/fixtures/raw_olist/*.csv (8 of 9),
 warehouse/fixtures/README.md, warehouse/README.md, warehouse/dbt_project.yml,
 tests/warehouse/test_fixture_db.py (orders count read from the fixture plan),
 docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-018), docs/PLAN.md, docs/PROGRESS.md
+
+**Review round 1 (2026-11-05, PR #15 approved with three findings, all fixed; not committed).**
+Real-data results the reviewer measured before the fix (counts only): `dim_date` 1,096,
+`dim_customer` 96,096, `dim_seller` 3,095, `dim_product` 32,951, `fact_order_items` 112,650,
+`fact_deliveries` 99,441 (as expected); `dbt build` **PASS=220 WARN=1** (the geo bounding-box
+warning, 8 prefixes); `core` ≈ 70 MB; whole database ≈ 253 MB. Every real-data assumption above held.
+Fixes: (1) **FX test cost**: `assert_fact_order_items_fx_rate_is_latest_on_or_before_purchase`
+computes the expected rate date once per distinct `purchase_date` and joins that to the items
+on equality (was a 112,650 items × all rates nested loop, 10.5 s on real data, the slowest
+step of every daily build). Synthetic real-size check locally (112,650 items, 630 days, 565 BRL
+rates): ≈ 2.6 s → ≈ 75 ms, and the old and new queries flag the same 100 rows with the same
+reasons after 3 mutation types; on the fixtures, seven mutations (wrong `fx_rate_date` with the
+rate kept, an older published date with its rate, a date after the purchase, a dropped rate
+inside the look-back, a rate past day 7, a rate before the first rate, a wrong `brl_per_eur`)
+each fail it. (2) **Geo warning**: option (a). `dim_geo` gets `has_invalid_coordinates`;
+a prefix whose median lies outside Brazil's bounding box (macro `inside_brazil_bbox`, lat −34..6,
+lng −74..−28: the eastern bound moved from −34 to −28 so Fernando de Noronha, prefix 53990, is
+not NULLed) has NULL `latitude` / `longitude`. `assert_dim_geo_coordinates_inside_brazil` is now
+an **error** that checks the published result (six corruptions each fail it); fixture prefix
+45000 (2 of 3 points in Lisbon) and the unit test (plus a Noronha point that is kept) exercise it.
+Contract §3 and ADR-018 updated. (3) **FX wording** in contract §3, ADR-018 and the
+`fact_order_items` header: NULL before the first rate, or when no rate exists on or within 7 days
+before the purchase date.
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, port 52649, deleted
+afterwards): `ruff check .` clean; `fixture_db load` → `dbt build` **PASS=222 WARN=0 ERROR=0**
+(199 data tests: + `has_invalid_coordinates` not null) → `fixture_db check` ok; `pytest
+tests/warehouse` 37 passed; full `pytest` 399 passed, 2 skipped. Expected on real data:
+PASS=222 WARN=0, with ≤ 8 prefixes flagged (8 if none of them lies between lng −34 and −28).
+**Facts for 2.3 (from the reviewer, real data), not errors in 2.1:** 35 sellers' `seller_state`
+differs from their prefix's `dim_geo.state`; 166 orders have `delivered_carrier_at` before
+`purchased_at`; 775 orders have no items and 1 has no payment; 174 zip prefixes have a tied
+(city, state) pair (resolved by the byte-order rule). Marts must pick which state they report
+(seller's own vs `dim_geo`), exclude or flag negative carrier lead times, and not assume every
+order has items and a payment (use `fact_deliveries` for order counts).
+Files touched (round 1): warehouse/models/core/{dim_geo.sql,fact_order_items.sql,
+_core__models.yml,_core__unit_tests.yml}, warehouse/macros/inside_brazil_bbox.sql (new),
+warehouse/tests/core/{assert_dim_geo_coordinates_inside_brazil,
+assert_fact_order_items_fx_rate_is_latest_on_or_before_purchase}.sql,
+warehouse/fixtures/raw_olist/olist_geolocation_dataset.csv, warehouse/fixtures/README.md,
+docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-018), docs/PROGRESS.md
 
 ### 2026-11-04 — orchestrator — 2.6 first live run
 Done: PR #13 merged (b401a7e). Owner confirmed (in chat; the environments API is not readable from

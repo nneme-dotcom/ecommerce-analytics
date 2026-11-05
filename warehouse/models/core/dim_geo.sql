@@ -3,6 +3,10 @@
 -- Deterministic aggregation rule (ADR-018):
 --   latitude / longitude = median (percentile_cont 0.5) of the prefix's geolocation points,
 --     computed separately per axis; robust to the few points far outside Brazil.
+--   has_invalid_coordinates = the prefix has geolocation points but their median lies outside
+--     Brazil's bounding box (macro inside_brazil_bbox; most of its points are bad, so the median
+--     cannot fix it; real data: at most 8 prefixes). Its latitude / longitude are then
+--     NULL, so no map or distance uses them; city / state are kept.
 --   city / state = the most frequent (city, state) pair among the prefix's geolocation rows;
 --     ties -> lowest state, then lowest city, in byte order (COLLATE "C", so the result does not
 --     depend on the database's collation).
@@ -112,7 +116,7 @@ ranked_places as (
 
 ),
 
-final as (
+located as (
 
     select
         ranked_places.zip_code_prefix,
@@ -121,11 +125,30 @@ final as (
         geo_points.latitude,
         geo_points.longitude,
         coalesce(geo_points.geolocation_rows, 0) as geolocation_rows,
-        geo_points.zip_code_prefix is not null as has_geolocation
+        geo_points.zip_code_prefix is not null as has_geolocation,
+        coalesce(
+            not {{ inside_brazil_bbox('geo_points.latitude', 'geo_points.longitude') }},
+            false
+        ) as has_invalid_coordinates
     from ranked_places
     left join geo_points
         on geo_points.zip_code_prefix = ranked_places.zip_code_prefix
     where ranked_places.place_rank = 1
+
+),
+
+final as (
+
+    select
+        zip_code_prefix,
+        city,
+        state,
+        case when not has_invalid_coordinates then latitude end as latitude,
+        case when not has_invalid_coordinates then longitude end as longitude,
+        geolocation_rows,
+        has_geolocation,
+        has_invalid_coordinates
+    from located
 
 )
 

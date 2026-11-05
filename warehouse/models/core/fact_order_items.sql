@@ -3,8 +3,10 @@
 -- Amounts in BRL as published by Olist, plus EUR at the ECB rate (ADR-018):
 --   brl_per_eur = the latest ECB EUR->BRL rate published on or before the purchase date, looked
 --   back at most 7 calendar days (ECB publication gaps are weekends and TARGET holidays, at most
---   4 days); fx_rate_date says which one. Outside the loaded rate range (or past the 7-day
---   look-back) the EUR columns are NULL. EUR = BRL / brl_per_eur, rounded to 4 decimals.
+--   4 days); fx_rate_date says which one. The rate and EUR columns are NULL before the first
+--   rate, or when no rate exists on or within 7 days before the purchase date (so the last rate
+--   is carried at most 7 days past the end of the loaded range). EUR = BRL / brl_per_eur,
+--   rounded to 4 decimals.
 
 with order_items as (
 

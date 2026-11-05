@@ -8,7 +8,9 @@ unit_tests:
     description: >
       Median lat/lng per axis (an outlier does not move it), most frequent (city, state) pair,
       ties by byte order, and prefixes known only from customers/sellers fall back to their
-      most frequent pair with NULL coordinates.
+      most frequent pair with NULL coordinates. A prefix whose median lies outside Brazil's
+      bounding box (most points abroad) gets NULL coordinates and has_invalid_coordinates;
+      an oceanic island east of the mainland (Fernando de Noronha) keeps its point.
     model: dim_geo
     given:
       - input: ref('stg_olist__geolocation')
@@ -19,6 +21,10 @@ unit_tests:
           - {geolocation_zip_code_prefix: '01310', geolocation_lat: 40.0, geolocation_lng: -74.0, geolocation_city: sao paulo, geolocation_state: SP}
           - {geolocation_zip_code_prefix: '22041', geolocation_lat: -22.75, geolocation_lng: -43.25, geolocation_city: rio de janeiro, geolocation_state: RJ}
           - {geolocation_zip_code_prefix: '22041', geolocation_lat: -22.25, geolocation_lng: -43.75, geolocation_city: copacabana, geolocation_state: RJ}
+          - {geolocation_zip_code_prefix: '45000', geolocation_lat: 38.75, geolocation_lng: -9.25, geolocation_city: vitoria da conquista, geolocation_state: BA}
+          - {geolocation_zip_code_prefix: '45000', geolocation_lat: 38.5, geolocation_lng: -9.5, geolocation_city: vitoria da conquista, geolocation_state: BA}
+          - {geolocation_zip_code_prefix: '45000', geolocation_lat: -14.75, geolocation_lng: -40.75, geolocation_city: vitoria da conquista, geolocation_state: BA}
+          - {geolocation_zip_code_prefix: '53990', geolocation_lat: -3.75, geolocation_lng: -32.5, geolocation_city: fernando de noronha, geolocation_state: PE}
       - input: ref('stg_olist__customers')
         rows:
           - {customer_id: c1, customer_zip_code_prefix: '01310', customer_city: other name, customer_state: SP}
@@ -30,10 +36,12 @@ unit_tests:
           - {seller_id: s2, seller_zip_code_prefix: '88015', seller_city: florianopolis, seller_state: SC}
     expect:
       rows:
-        - {zip_code_prefix: '01310', city: sao paulo, state: SP, latitude: -23.5, longitude: -46.625, geolocation_rows: 4, has_geolocation: true}
-        - {zip_code_prefix: '22041', city: copacabana, state: RJ, latitude: -22.5, longitude: -43.5, geolocation_rows: 2, has_geolocation: true}
-        - {zip_code_prefix: '69900', city: rio branco, state: AC, latitude: null, longitude: null, geolocation_rows: 0, has_geolocation: false}
-        - {zip_code_prefix: '88015', city: florianopolis, state: SC, latitude: null, longitude: null, geolocation_rows: 0, has_geolocation: false}
+        - {zip_code_prefix: '01310', city: sao paulo, state: SP, latitude: -23.5, longitude: -46.625, geolocation_rows: 4, has_geolocation: true, has_invalid_coordinates: false}
+        - {zip_code_prefix: '22041', city: copacabana, state: RJ, latitude: -22.5, longitude: -43.5, geolocation_rows: 2, has_geolocation: true, has_invalid_coordinates: false}
+        - {zip_code_prefix: '45000', city: vitoria da conquista, state: BA, latitude: null, longitude: null, geolocation_rows: 3, has_geolocation: true, has_invalid_coordinates: true}
+        - {zip_code_prefix: '53990', city: fernando de noronha, state: PE, latitude: -3.75, longitude: -32.5, geolocation_rows: 1, has_geolocation: true, has_invalid_coordinates: false}
+        - {zip_code_prefix: '69900', city: rio branco, state: AC, latitude: null, longitude: null, geolocation_rows: 0, has_geolocation: false, has_invalid_coordinates: false}
+        - {zip_code_prefix: '88015', city: florianopolis, state: SC, latitude: null, longitude: null, geolocation_rows: 0, has_geolocation: false, has_invalid_coordinates: false}
 
   - name: fact_order_items_fx_carry_forward_and_look_back
     description: >
