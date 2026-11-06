@@ -28,6 +28,7 @@ Status: `todo` · `in progress` · `in review` · `done`.
 | 1.10 | ML raw loader polish (PR #11 round-2 low findings) | data-engineer | todo | A file read `OSError` names the folder/file (load.py:256,298); the orphan-plus-drift error and §1b also offer "delete that day's rows by hand" when a day was removed on purpose (load.py:483-490); "stored day(s)" wording in both messages (load.py:493-497) |
 | 1.11 | dbt CI polish (PR #12 round-2 low findings) | analytics-engineer | todo | Confirm the FX/holiday/translation values in `warehouse/fixtures/` against the live APIs (or soften the README "real public facts" wording; the 2017-11-20 BR entry looks hand-made); `persist-credentials: false` on the `python` and `secrets` CI jobs |
 | 1.12 | `warehouse_env.py` URL parity with libpq (PR #13 round-2 low findings) | devops | todo | Refuse `%` in the host; strict percent-decoding (`%[0-9A-Fa-f]{2}`, `errors="strict"`); case-sensitive `postgresql://`/`postgres://` prefix on the raw URL; refuse any `#` and empty query pairs (`?&`); decoded-value check refuses all Unicode Cc like the raw check; keep the summary step's DB errors type-only |
+| 1.13 | `expected_warnings` hardening (PR #17 round-3 low findings) | analytics-engineer | todo | Allowlist of good statuses (`success`, `pass`, `warn`, `no-op`, `reused`); any other or missing status fails, e.g. `partial success` (expected_warnings.py:38, `problems()`); a non-object entry in `results` gives the tool's own error, not a traceback (`read_results`) |
 
 ## Phase 2 — Model and metrics
 

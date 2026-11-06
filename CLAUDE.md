@@ -97,13 +97,14 @@ Filled in as each area is built. Keep this section accurate.
 | Load warehouse CI fixtures into a throwaway DB (env `DATABASE_URL`; opt-in `FIXTURE_DB_ALLOW=1`; refuses a DB with more rows than the fixtures; never the real warehouse) | `FIXTURE_DB_ALLOW=1 python -m warehouse.ci.fixture_db load --inventory <file>` |
 | dbt build (env `DBT_PG_HOST`, `DBT_PG_PORT`, `DBT_PG_USER`, `DBT_ENV_SECRET_PG_PASSWORD`, `DBT_PG_DBNAME`, `DBT_PG_SSLMODE`; all optional, local defaults) | `dbt build --project-dir warehouse --profiles-dir warehouse` |
 | Check dbt created only `staging`/`core`/`marts` and left `raw_*` and `public` unchanged (fixture DB only) | `python -m warehouse.ci.fixture_db check --inventory <file>` |
+| Check the fixture `dbt build` warned on exactly the expected tests (after the fixture build; no DB needed) | `python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json` |
 | Test the dbt schema guards (needs dbt) | `pytest tests/warehouse` |
 | Load the Neon warehouse and dbt build (main only, Environment `warehouse`; chained after each successful ML snapshot as `daily`) | `gh workflow run warehouse-load.yml --ref main -f mode=full` (or `-f mode=daily`; watch: `gh run watch`) |
 | Split a warehouse URL into the dbt profile variables, masked (GitHub Actions only; env `WAREHOUSE_DATABASE_URL`, `GITHUB_ENV`) | `python scripts/warehouse_env.py` |
 | Decide the optional raw loads / write the warehouse job summary (env `DATABASE_URL`) | `python -m scripts.warehouse_report plan --mode daily\|full --olist-zip <data-repo>/olist/archive.zip` · `python -m scripts.warehouse_report summary --mode <m> [--run-results warehouse/target/run_results.json] [--olist-manifest <dir>/manifest.json]` |
 
 Olist, enrichment and ML raw loaders exit 0 ok, 1 fetch/validation/load failed (nothing changed), 2 configuration error.
-`warehouse_env.py` exits 0 ok, 2 URL missing/malformed/not allowed; `warehouse_report` exits 0 ok, 1 database/input error, 2 configuration error.
+`expected_warnings` exits 0 ok, 1 unexpected/missing warnings or a failed/skipped node, 2 usage or unreadable file. `warehouse_env.py` exits 0 ok, 2 URL missing/malformed/not allowed; `warehouse_report` exits 0 ok, 1 database/input error, 2 configuration error.
 
 Snapshot exit codes (ADR-008; the scheduled workflow branches on these):
 
