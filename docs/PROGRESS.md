@@ -4,7 +4,7 @@ Current state at the top; handoff log below (newest first).
 
 ## Current state
 
-- **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
+- **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 done on 2026-11-06)
 - **Next up:** 2.3 business metric marts. 2.6 closes once `pg_database_size` is read from a run's job summary (owner). 2.7 (ML raw storage growth) needs an owner decision before Neon nears 80 %. Neon PostgreSQL version still to be confirmed. Follow-ups 1.6–1.13 alongside.
 - **Blockers:** none.
 
