@@ -1,0 +1,161 @@
+# Source: schema raw_mercadolibre, loaded by `python -m ingestion.mercadolibre.load` from the
+# private data repo (DATA_CONTRACT §1b, ADR-015). Values are typed in raw; `payload` holds the
+# full line. Every day of every run status is loaded: filter on runs.status downstream (core).
+# tests/assert_sources_match_contract.sql checks that the columns and types declared here are
+# exactly those of the database tables (types as printed by format_type()), so this file,
+# ingestion/mercadolibre/raw_schema.py and §1b change together.
+# Raw ML data is third-party and private (ADR-003): it is modelled here, never republished.
+version: 2
+
+sources:
+  - name: mercadolibre
+    description: Daily Mercado Libre (MLA) snapshots - best sellers, catalog products, every offer, trends.
+    schema: raw_mercadolibre
+    tables:
+      - name: runs
+        description: One row per loaded day (run.json). Grain = PK snapshot_date.
+        columns:
+          - name: snapshot_date
+            data_type: date
+            data_tests: [not_null, unique]
+          - name: run_id
+            data_type: uuid
+            data_tests: [not_null]
+          - name: status
+            data_type: text
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [success, partial, failed]
+          - {name: started_at, data_type: timestamp with time zone}
+          - {name: finished_at, data_type: timestamp with time zone}
+          - {name: site_id, data_type: text}
+          - {name: categories, data_type: "text[]"}
+          - {name: categories_requested, data_type: "text[]"}
+          - {name: requests_made, data_type: integer}
+          - {name: request_cap, data_type: integer}
+          - {name: request_cap_reached, data_type: boolean}
+          - name: row_counts
+            data_type: jsonb
+            data_tests: [not_null]
+          - {name: skipped_highlights, data_type: jsonb}
+          - {name: products_without_offers, data_type: integer}
+          - {name: errors, data_type: jsonb}
+          - name: payload
+            data_type: jsonb
+            data_tests: [not_null]
+          - name: load_id
+            data_type: uuid
+            data_tests: [not_null]
+          - name: file_sha256
+            data_type: jsonb
+            data_tests: [not_null]
+
+      - name: highlights
+        description: One row per (category, ranked entry) per day, any type. PK (snapshot_date, line_no).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [snapshot_date, line_no]
+        columns:
+          - {name: snapshot_date, data_type: date, data_tests: [not_null]}
+          - {name: run_id, data_type: uuid, data_tests: [not_null]}
+          - {name: line_no, data_type: integer, data_tests: [not_null]}
+          - {name: captured_at, data_type: timestamp with time zone, data_tests: [not_null]}
+          - {name: category_id, data_type: text, data_tests: [not_null]}
+          - {name: position, data_type: integer}
+          - {name: product_id, data_type: text, data_tests: [not_null]}
+          - {name: type, data_type: text}
+          - {name: payload, data_type: jsonb, data_tests: [not_null]}
+
+      - name: products
+        description: One row per catalog product fetched per day. PK (snapshot_date, line_no).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [snapshot_date, line_no]
+        columns:
+          - {name: snapshot_date, data_type: date, data_tests: [not_null]}
+          - {name: run_id, data_type: uuid, data_tests: [not_null]}
+          - {name: line_no, data_type: integer, data_tests: [not_null]}
+          - {name: captured_at, data_type: timestamp with time zone, data_tests: [not_null]}
+          - {name: product_id, data_type: text, data_tests: [not_null]}
+          - {name: name, data_type: text}
+          - {name: domain_id, data_type: text}
+          - {name: family_name, data_type: text}
+          - {name: status, data_type: text}
+          - {name: brand, data_type: text}
+          - {name: model, data_type: text}
+          - {name: permalink, data_type: text}
+          - {name: payload, data_type: jsonb, data_tests: [not_null]}
+
+      - name: offers
+        description: >
+          One row per offer per product per day. PK (snapshot_date, line_no); item_id is
+          nullable and not a key in raw (uniqueness of (snapshot_date, product_id, item_id) is a
+          staging test).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [snapshot_date, line_no]
+        columns:
+          - {name: snapshot_date, data_type: date, data_tests: [not_null]}
+          - {name: run_id, data_type: uuid, data_tests: [not_null]}
+          - {name: line_no, data_type: integer, data_tests: [not_null]}
+          - {name: captured_at, data_type: timestamp with time zone, data_tests: [not_null]}
+          - {name: product_id, data_type: text, data_tests: [not_null]}
+          - {name: item_id, data_type: text}
+          - {name: seller_id, data_type: bigint}
+          - {name: official_store_id, data_type: bigint}
+          - {name: price, data_type: numeric}
+          - {name: original_price, data_type: numeric}
+          - {name: currency_id, data_type: text}
+          - {name: condition, data_type: text}
+          - {name: listing_type_id, data_type: text}
+          - {name: category_id, data_type: text}
+          - {name: free_shipping, data_type: boolean}
+          - {name: logistic_type, data_type: text}
+          - {name: shipping_mode, data_type: text}
+          - {name: deal_ids, data_type: "text[]"}
+          - {name: tags, data_type: "text[]"}
+          - {name: seller_state, data_type: text}
+          - {name: payload, data_type: jsonb, data_tests: [not_null]}
+
+      - name: trends
+        description: One row per trending keyword per day. PK (snapshot_date, line_no).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [snapshot_date, line_no]
+        columns:
+          - {name: snapshot_date, data_type: date, data_tests: [not_null]}
+          - {name: run_id, data_type: uuid, data_tests: [not_null]}
+          - {name: line_no, data_type: integer, data_tests: [not_null]}
+          - {name: captured_at, data_type: timestamp with time zone, data_tests: [not_null]}
+          - {name: position, data_type: integer, data_tests: [not_null]}
+          - {name: keyword, data_type: text}
+          - {name: url, data_type: text}
+          - {name: payload, data_type: jsonb, data_tests: [not_null]}
+
+      - name: _load_audit
+        description: Append-only, one row per table per day loaded (DATA_CONTRACT §1b).
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [load_id, snapshot_date, table_name]
+        columns:
+          - {name: load_id, data_type: uuid, data_tests: [not_null]}
+          - {name: snapshot_date, data_type: date, data_tests: [not_null]}
+          - name: table_name
+            data_type: text
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [runs, highlights, products, offers, trends]
+          - {name: run_id, data_type: uuid, data_tests: [not_null]}
+          - {name: source_file, data_type: text, data_tests: [not_null]}
+          - {name: row_count, data_type: bigint, data_tests: [not_null]}
+          - {name: file_sha256, data_type: character(64), data_tests: [not_null]}
+          - {name: loaded_at, data_type: timestamp with time zone, data_tests: [not_null]}

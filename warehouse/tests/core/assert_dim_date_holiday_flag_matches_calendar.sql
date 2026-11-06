@@ -1,9 +1,11 @@
 {#-
-    core.dim_date.is_br_public_holiday (DATA_CONTRACT §3, ADR-018):
-      - NULL exactly in the years with no BR row in the holiday calendar (unknown, not false);
-      - true exactly on the dates with a nationwide (is_global) BR entry of type Public, and then
-        br_holiday_name is set; regional or non-Public entries never set it.
-    Returns the offending days with the reason.
+    core.dim_date.is_br_public_holiday and is_ar_public_holiday (DATA_CONTRACT §3, ADR-018,
+    ADR-019), for each country:
+      - NULL exactly in the years with no row for that country in the holiday calendar
+        (unknown, not false);
+      - true exactly on the dates with a nationwide (is_global) entry of type Public, and then
+        the holiday name is set; regional or non-Public entries never set it.
+    Returns the offending (country, day) pairs with the reason.
 -#}
 
 with dates as (
@@ -18,47 +20,61 @@ holidays as (
 
 ),
 
-br_years as (
+flags as (
 
-    select distinct extract(year from holiday_date)::integer as calendar_year
+    select 'BR' as country_code, date_day, calendar_year,
+        is_br_public_holiday as is_holiday, br_holiday_name as holiday_name
+    from dates
+    union all
+    select 'AR' as country_code, date_day, calendar_year,
+        is_ar_public_holiday as is_holiday, ar_holiday_name as holiday_name
+    from dates
+
+),
+
+calendar_years as (
+
+    select distinct country_code, extract(year from holiday_date)::integer as calendar_year
     from holidays
-    where country_code = 'BR'
 
 ),
 
 nationwide as (
 
-    select distinct holiday_date
+    select distinct country_code, holiday_date
     from holidays
-    where country_code = 'BR' and is_global and 'Public' = any(holiday_types)
+    where is_global and 'Public' = any(holiday_types)
 
 ),
 
 checked as (
 
     select
-        dates.date_day,
-        dates.is_br_public_holiday,
-        dates.br_holiday_name,
+        flags.country_code,
+        flags.date_day,
+        flags.is_holiday,
+        flags.holiday_name,
         case
-            when br_years.calendar_year is null and dates.is_br_public_holiday is not null
-                then 'flag set in a year without a BR calendar'
-            when br_years.calendar_year is not null and dates.is_br_public_holiday is null
-                then 'flag NULL in a year with a BR calendar'
-            when dates.is_br_public_holiday and nationwide.holiday_date is null
+            when calendar_years.calendar_year is null and flags.is_holiday is not null
+                then 'flag set in a year without a calendar for the country'
+            when calendar_years.calendar_year is not null and flags.is_holiday is null
+                then 'flag NULL in a year with a calendar for the country'
+            when flags.is_holiday and nationwide.holiday_date is null
                 then 'flagged but not a nationwide public holiday'
-            when not dates.is_br_public_holiday and nationwide.holiday_date is not null
+            when not flags.is_holiday and nationwide.holiday_date is not null
                 then 'nationwide public holiday not flagged'
-            when dates.is_br_public_holiday and dates.br_holiday_name is null
+            when flags.is_holiday and flags.holiday_name is null
                 then 'holiday without a name'
-            when not dates.is_br_public_holiday and dates.br_holiday_name is not null
+            when not flags.is_holiday and flags.holiday_name is not null
                 then 'name on a non-holiday'
         end as problem
-    from dates
-    left join br_years
-        on br_years.calendar_year = dates.calendar_year
+    from flags
+    left join calendar_years
+        on calendar_years.country_code = flags.country_code
+        and calendar_years.calendar_year = flags.calendar_year
     left join nationwide
-        on nationwide.holiday_date = dates.date_day
+        on nationwide.country_code = flags.country_code
+        and nationwide.holiday_date = flags.date_day
 
 )
 

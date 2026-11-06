@@ -1,0 +1,140 @@
+# Mercado Libre price history (task 2.2, DATA_CONTRACT §3 "core models - Mercado Libre price
+# history", ADR-019). Tables in schema core. Offer-level third-party data: never exposed by the
+# API (ADR-003, ADR-014); marts publish aggregates only. Keys: Mercado Libre natural ids and the
+# date. Only days with run status success or partial count (macro ml_included_run_statuses).
+# Singular tests in tests/core/ (reconciliation, discount, best seller, dimension coverage).
+version: 2
+
+models:
+  - name: fact_offer_snapshot
+    description: >
+      Grain: one row per offer (item_id on catalog product_id) per snapshot_date, success and
+      partial days only (run_status says which). Prices in the offer's currency_id (ARS), not
+      converted (no ECB ARS rate, ADR-012). Discount only where original_price > price. The
+      best-seller position is a demand proxy, not sales.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, product_id, item_id]
+    columns:
+      - name: snapshot_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_ml_product')
+                field: product_id
+      - name: item_id
+        data_tests: [not_null]
+      - name: seller_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_ml_seller')
+                field: seller_id
+      - name: listing_category_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_ml_category')
+                field: category_id
+      - name: run_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [success, partial]
+      - name: price
+        data_tests: [not_null, positive]
+      - name: original_price
+        data_tests: [positive]
+      - name: currency_id
+        description: ARS on the real data; MLA also allows USD listings. Never aggregate across currencies.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ARS, USD]
+      - name: has_discount
+        data_tests: [not_null]
+      - name: is_official_store
+        data_tests: [not_null]
+      - name: is_best_seller
+        data_tests: [not_null]
+      - name: best_seller_category_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_ml_category')
+                field: category_id
+      - name: best_seller_position
+        data_tests: [positive]
+      - name: best_seller_category_count
+        data_tests: [not_null, not_negative]
+      - name: offers_in_product
+        data_tests: [not_null, positive]
+      - name: price_rank_in_product
+        data_tests: [not_null, positive]
+
+  - name: dim_ml_product
+    description: >
+      Grain: one row per catalog product (product_id) seen on an included day in products,
+      offers or a PRODUCT highlight. Type 1: attributes from the latest included day with a
+      products row (attributes_as_of); NULL with has_product_details = false if never fetched.
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+      - name: has_product_details
+        data_tests: [not_null]
+      - name: first_seen_date
+        data_tests: [not_null]
+      - name: last_seen_date
+        data_tests: [not_null]
+      - name: days_ranked
+        data_tests: [not_null, not_negative]
+      - name: days_with_offers
+        data_tests: [not_null, not_negative]
+
+  - name: dim_ml_seller
+    description: >
+      Grain: one row per seller (seller_id) with an offer on an included day. Type 1:
+      seller_state = latest included day's non-NULL state (ties by byte order).
+    columns:
+      - name: seller_id
+        data_tests: [not_null, unique]
+      - name: first_seen_date
+        data_tests: [not_null]
+      - name: last_seen_date
+        data_tests: [not_null]
+      - name: days_seen
+        data_tests: [not_null, positive]
+
+  - name: dim_ml_category
+    description: >
+      Grain: one row per category (category_id) seen on an included day as a best-seller
+      category or as an offer's category_id. No name (not captured by the snapshot).
+    data_tests:
+      - expression_is_true:
+          arguments:
+            expression: is_ranking_category or is_listing_category
+    columns:
+      - name: category_id
+        data_tests: [not_null, unique]
+      - name: is_ranking_category
+        data_tests: [not_null]
+      - name: is_listing_category
+        data_tests: [not_null]
+      - name: first_seen_date
+        data_tests: [not_null]
+      - name: last_seen_date
+        data_tests: [not_null]
+      - name: days_ranked
+        data_tests: [not_null, not_negative]

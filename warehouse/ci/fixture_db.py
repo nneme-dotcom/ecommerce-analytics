@@ -5,13 +5,16 @@
     dbt build --project-dir warehouse --profiles-dir warehouse
     DATABASE_URL=postgresql://... python -m warehouse.ci.fixture_db check --inventory <file>
 
-``load`` fills ``raw_olist`` and ``raw_enrichment`` from ``warehouse/fixtures/`` with the **real
-loaders** (``ingestion.olist.load``, ``ingestion.enrichment.fx_rates`` / ``holidays``), so the raw
-tables have exactly the loaders' DDL and the fixtures pass the loaders' own validation. dbt seeds
-are not used: dbt never writes into a ``raw_*`` schema. It then writes an inventory (below).
+``load`` fills ``raw_olist`` and ``raw_enrichment`` from ``warehouse/fixtures/`` and
+``raw_mercadolibre`` from synthetic day folders (``warehouse/ci/ml_fixture_days.py``: written to a
+temporary folder by the real snapshot writer from ``tests/mercadolibre/ml_fixtures.py`` payloads)
+with the **real loaders** (``ingestion.olist.load``, ``ingestion.enrichment.fx_rates`` /
+``holidays``, ``ingestion.mercadolibre.load``), so the raw tables have exactly the loaders' DDL
+and the fixtures pass the loaders' own validation. dbt seeds are not used: dbt never writes into
+a ``raw_*`` schema. It then writes an inventory (below).
 
-``load`` replaces raw table contents (Olist ``TRUNCATE``, enrichment delete-and-insert), so it
-refuses to run (exit 2, nothing written) unless
+``load`` replaces raw table contents (Olist ``TRUNCATE``, enrichment and ML delete-and-insert),
+so it refuses to run (exit 2, nothing written) unless
 
 - the environment variable ``FIXTURE_DB_ALLOW`` is ``1`` (set only in the CI ``dbt`` job), and
 - no table it writes already holds more rows than the fixtures put there (e.g. ``raw_olist.orders``
@@ -40,7 +43,8 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -50,8 +54,14 @@ from ingestion.db import ConfigError, connect, database_url_from_env
 from ingestion.enrichment import fx_rates, holidays
 from ingestion.enrichment.http import FetchError
 from ingestion.enrichment.store import SchemaDriftError
+from ingestion.mercadolibre import load as ml_load
+from ingestion.mercadolibre.raw_schema import FILE_TABLES as ML_FILE_TABLES
+from ingestion.mercadolibre.raw_schema import RUNS_TABLE as ML_RUNS_TABLE
+from ingestion.mercadolibre.raw_schema import SCHEMA as ML_SCHEMA
+from ingestion.mercadolibre.raw_schema import SchemaDriftError as MlSchemaDriftError
 from ingestion.olist import load as olist_load
 from ingestion.olist.files import RAW_SCHEMA as OLIST_SCHEMA
+from warehouse.ci import ml_fixture_days
 
 EXIT_OK, EXIT_FAILED, EXIT_CONFIG = 0, 1, 2
 
@@ -87,17 +97,39 @@ class FixturePlan:
     fx_window: tuple[date, date, tuple[str, ...]]
     holiday_rows: list[holidays.Holiday]
     holiday_plan: list[tuple[str, int]]
+    ml_days: list[ml_load.DayFolder]
+    # Keeps the temporary ML day folders alive as long as the plan (the load reads them again).
+    ml_tmp: tempfile.TemporaryDirectory | None = field(default=None, repr=False, compare=False)
 
     def expected_rows(self) -> dict[str, int]:
         """``{"schema.table": rows}`` for every data table the load writes (not ``_load_audit``)."""
         counts = {f"{OLIST_SCHEMA}.{p.spec.table}": p.rows for p in self.olist}
         counts[f"{ENRICHMENT_SCHEMA}.fx_rates"] = len(self.fx_rows)
         counts[f"{ENRICHMENT_SCHEMA}.public_holidays"] = len(self.holiday_rows)
+        counts[f"{ML_SCHEMA}.{ML_RUNS_TABLE}"] = len(self.ml_days)
+        for kind in ML_FILE_TABLES:
+            counts[f"{ML_SCHEMA}.{kind}"] = sum(d.row_counts[kind] for d in self.ml_days)
         return counts
 
 
-def prepare_fixtures() -> FixturePlan:
-    """Parse and validate every fixture with the loaders' own functions (no database access)."""
+def prepare_ml_days(root: Path) -> list[ml_load.DayFolder]:
+    """Write the synthetic ML day folders under ``root`` with the snapshot writer, then validate
+    them with the raw loader's own ``prepare`` (no database access)."""
+    ml_fixture_days.write_days(root)
+    return ml_load.prepare(root)
+
+
+def prepare_fixtures(ml_root: Path | None = None) -> FixturePlan:
+    """Parse and validate every fixture with the loaders' own functions (no database access).
+
+    The ML day folders are written under ``ml_root``, or else a temporary folder that lives as
+    long as the returned plan.
+    """
+    ml_tmp = None
+    if ml_root is None:
+        ml_tmp = tempfile.TemporaryDirectory(prefix="ml-fixture-days-")
+        ml_root = Path(ml_tmp.name)
+    ml_days = prepare_ml_days(ml_root)
     prepared = olist_load.prepare(FIXTURES / "raw_olist")
 
     # parse_float=Decimal, as the loaders' HTTP client does (rates stay exact).
@@ -117,7 +149,7 @@ def prepare_fixtures() -> FixturePlan:
         country, year = key.split(":")
         plan.append((country, int(year)))
         rows.extend(holidays.parse_holidays(payload, country, int(year)))
-    return FixturePlan(prepared, rates, (start, end, quotes), rows, plan)
+    return FixturePlan(prepared, rates, (start, end, quotes), rows, plan, ml_days, ml_tmp)
 
 
 def refuse_if_not_fixture_db(cur, expected: dict[str, int]) -> None:
@@ -151,6 +183,9 @@ def load_fixtures(conn, plan: FixturePlan) -> None:
     logger.info("%s.fx_rates: %d rows", ENRICHMENT_SCHEMA, n_rates)
     n_holidays = holidays.load_holidays(conn, plan.holiday_rows, plan.holiday_plan)
     logger.info("%s.public_holidays: %d rows", ENRICHMENT_SCHEMA, n_holidays)
+    # full_reload: always write the fixture days, whatever hashes an earlier load stored.
+    summary = ml_load.load(conn, plan.ml_days, full_reload=True)
+    logger.info("%s: %d days, rows %s", ML_SCHEMA, len(summary.loaded), summary.rows)
 
 
 def user_schemas(cur) -> set[str]:
@@ -334,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         plan = prepare_fixtures() if args.command == "load" else None
-    except (olist_load.LoadError, FetchError) as exc:
+    except (olist_load.LoadError, FetchError, ml_load.LoadError) as exc:
         logger.error("fixtures are invalid: %s", exc)
         return EXIT_FAILED
     try:
@@ -369,7 +404,15 @@ def main(argv: list[str] | None = None) -> int:
     except RefusedError as exc:
         logger.error("%s", exc)
         return EXIT_CONFIG
-    except (olist_load.LoadError, FetchError, SchemaDriftError, CheckError, psycopg.Error) as exc:
+    except (
+        olist_load.LoadError,
+        FetchError,
+        SchemaDriftError,
+        ml_load.LoadError,
+        MlSchemaDriftError,
+        CheckError,
+        psycopg.Error,
+    ) as exc:
         logger.error("%s failed: %s", args.command, exc)
         return EXIT_FAILED
     return EXIT_OK

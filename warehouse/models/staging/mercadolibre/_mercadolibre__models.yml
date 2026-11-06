@@ -1,0 +1,119 @@
+# Mercado Libre staging views (DATA_CONTRACT §3 "Mercado Libre staging", task 2.2). One model per
+# raw_mercadolibre data table, one row per raw record, every run status. Raw is already typed;
+# the views keep its names, NULL empty strings and drop payload. Key tests live here (§1b: the
+# offers key is a staging test); filtering by run status happens in core.
+version: 2
+
+models:
+  - name: stg_mercadolibre__runs
+    description: >
+      Grain: one row per snapshot day (snapshot_date), every status. status success / partial /
+      failed follows ADR-007; core uses success and partial only.
+    columns:
+      - name: snapshot_date
+        data_tests: [not_null, unique]
+      - name: run_id
+        data_tests: [not_null, unique]
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [success, partial, failed]
+
+  - name: stg_mercadolibre__highlights
+    description: >
+      Grain: one row per ranked entry per category per day (snapshot_date, category_id,
+      product_id), any type. product_id is a catalog product only for type PRODUCT.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, category_id, product_id]
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, line_no]
+    columns:
+      - name: snapshot_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_mercadolibre__runs')
+                field: snapshot_date
+      - name: category_id
+        data_tests: [not_null]
+      - name: product_id
+        data_tests: [not_null]
+      - name: position
+        data_tests: [positive]
+      - name: type
+        description: >
+          PRODUCT, USER_PRODUCT or ITEM (verified 2026-11-03). The writer keeps any type and
+          only PRODUCT is used downstream, so a new type is a warning.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [PRODUCT, USER_PRODUCT, ITEM]
+              config:
+                severity: warn
+
+  - name: stg_mercadolibre__products
+    description: Grain - one row per catalog product fetched per day (snapshot_date, product_id).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, product_id]
+    columns:
+      - name: snapshot_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_mercadolibre__runs')
+                field: snapshot_date
+      - name: product_id
+        data_tests: [not_null]
+
+  - name: stg_mercadolibre__offers
+    description: >
+      Grain: one row per offer per product per day (snapshot_date, product_id, item_id). Prices
+      in the offer's currency_id (ARS), not converted (ADR-012).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, product_id, item_id]
+    columns:
+      - name: snapshot_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_mercadolibre__runs')
+                field: snapshot_date
+      - name: product_id
+        data_tests: [not_null]
+      - name: item_id
+        description: >
+          Nullable in raw. An offer without item_id cannot be followed across days and is left
+          out of core.fact_offer_snapshot, so a NULL is a warning here (none in the real data).
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+
+  - name: stg_mercadolibre__trends
+    description: Grain - one row per trending keyword per day (snapshot_date, position).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [snapshot_date, position]
+    columns:
+      - name: snapshot_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_mercadolibre__runs')
+                field: snapshot_date
+      - name: position
+        data_tests: [not_null]

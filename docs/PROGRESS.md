@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.2 ML price-history model. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** review of 2.2 (ML price-history model, branch `warehouse/ml-price-model`, `in review`), then 2.3 marts. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,82 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-06 — analytics-engineer — 2.2 (branch `warehouse/ml-price-model`)
+Done: contract first (DATA_CONTRACT §3: `mercadolibre` source, "Mercado Libre staging", "core
+models — Mercado Libre price history", `dim_date` extended). **Source** `mercadolibre`
+(`raw_mercadolibre`: runs, highlights, products, offers, trends, `_load_audit`, every column
+and `format_type()` type, covered by `assert_sources_match_contract`; source tests = §1b keys
+and required columns). **Staging** (views, one row per raw record, every status):
+`stg_mercadolibre__runs` / `__highlights` / `__products` / `__offers` / `__trends`; §1b names,
+`nullif(text, '')`, `payload` dropped; offers key (`snapshot_date`, `product_id`, `item_id`)
+unique; NULL `item_id` and unknown highlight `type` are warnings. **Core** (tables, ADR-019):
+`fact_offer_snapshot` (one row per offer per included day; `success` + `partial` days, `failed`
+left out, `run_status` on every row; price/original price in `currency_id`, never converted
+(no ECB ARS rate, ADR-012); `has_discount` / `discount_amount` / `discount_pct` only where
+`original_price > price`; official store, free shipping, logistic type, fulfillment, deal;
+best-seller category/position = the product's lowest position that day across categories
+(ties by byte order) + `best_seller_category_count`; `offers_in_product`,
+`price_rank_in_product` per currency), `dim_ml_product`, `dim_ml_seller`, `dim_ml_category`
+(type 1, latest included value; members from every place an id appears). `dim_date` is now
+conformed: whole years of the Olist timestamps **and** the ML snapshot dates (real 2016–2026,
+4,018 rows) plus `is_ar_public_holiday` / `ar_holiday_name` (BR rule). Macro
+`ml_included_run_statuses`; generic test `expression_is_true`; singular tests
+`assert_fact_offer_snapshot_reconciles_with_raw` (per day, from the source),
+`_discount_rules`, `_best_seller_matches_highlights` (re-derived with `distinct on`, plus
+offer count / rank range), `assert_ml_dims_cover_their_sources`; the holiday-flag test now
+checks BR and AR. 3 unit tests (`_core__ml_unit_tests.yml`). **Fixtures:**
+`warehouse/ci/ml_fixture_days.py` writes 3 days (success / partial / failed) with the real
+snapshot writer from `tests/mercadolibre/ml_fixtures.py`; `fixture_db load` loads them with
+`ingestion.mercadolibre.load` (`full_reload`), counts them in the refusal guard and the
+inventory; cases in `warehouse/fixtures/README.md`. ADR-019. PLAN 2.2 → `in review`.
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, port 40549, deleted
+afterwards; no Neon): `ruff check .` clean; fresh DB `fixture_db load` → `dbt build`
+**PASS=364** (1 hook, 27 models, 7 unit tests, 329 data tests; WARN=0 ERROR=0) →
+`fixture_db check` ok (29 raw relations unchanged); `pytest tests/warehouse` 42 passed (5 new:
+ML refusal, ML loaded through the loader with its edge cases, reproducible day folders, 2 new
+`check` cases); full `pytest` 404 passed, 2 skipped (Olist real data). Fixture core rows: fact 11, products 5, sellers 6,
+categories 3, `dim_date` 3,652 (2017–2026). Negative checks: 6 model mutations (`>=` discount,
+failed days kept, reversed tie order, NULL `item_id` kept, earliest seller state, failed-day
+product rows) each fail their unit test; with unit tests excluded the data tests still catch the
+discount and tie mutations (the other four cannot occur in loader-produced data); 9 corruptions
+of the built tables (deleted fact row, wrong pct, discount on an equal price, wrong position,
+deleted seller, extra category, row on the failed day, rank out of range, unflagged AR holiday)
+each fail the intended test.
+**Real-data check** (data repo cloned to the scratchpad, 4 days 2026-11-03..06, all `success`;
+throwaway DB; clone and DB deleted; counts only): `raw_mercadolibre` loaded by the real loader
+(offers 9,439); real `raw_olist` from `olist/archive.zip`; enrichment **fixtures** (Frankfurter /
+Nager blocked by the proxy here, so Olist EUR and most holiday flags are NULL in that run).
+`dbt build` PASS=364 WARN=0 ERROR=0. `fact_offer_snapshot` 9,439 (= raw offers; 2,313 / 2,306
+/ 2,466 / 2,354 per day), `dim_ml_product` 112, `dim_ml_seller` 817, `dim_ml_category` 19 (5
+ranking, 18 listing), `dim_date` 4,018; 4,219 offers with a discount, 0 products in two
+categories on one day, 0 products without details; fact ≈ 2.0 MB (≈ 220 B a row).
+Not done / open: never run on Neon (the next `daily` run after merge builds it; expect PASS=364,
+WARN=0 and the counts above plus each new day). Category names are not captured (no
+`/categories/{id}` call): an ingestion task if the dashboard needs them. Trends have a staging
+view but no core model.
+Gotchas for the next agent: **ML core tables are offer-level and never exposed by the API**
+(ADR-003); 2.3 marts must aggregate. Count-based ML metrics must decide about `partial` days
+(`run_status`). Never sum prices across `currency_id`, and ARS cannot be compared with Olist's
+BRL/EUR. `best_seller_position` is a demand proxy, comparable within one category and day. The
+offer list is capped at 100 per product (7 of 337 real product-days), so `offers_in_product` /
+`price_rank_in_product` cover the captured offers only. `dim_date` now reads
+`stg_mercadolibre__runs`: a database without `raw_mercadolibre` cannot build. dbt unit-test
+inputs with `text[]` columns must be `format: sql` (dbt-postgres types dict fixtures as `ARRAY`).
+`fixture_db` imports `tests/mercadolibre/ml_fixtures.py` by path (tests/ is not a package): keep
+that file's helper signatures stable or update `ml_fixture_days.py`. The fact is rebuilt in full
+daily (≈ 190 MB a year): make it incremental by `snapshot_date` before Neon's 1 GB matters.
+Files touched: warehouse/models/staging/mercadolibre/** (new), warehouse/models/core/
+{fact_offer_snapshot,dim_ml_product,dim_ml_seller,dim_ml_category}.sql,
+`_core__ml_models.yml`, `_core__ml_unit_tests.yml` (new), warehouse/models/core/dim_date.sql,
+`_core__models.yml` (dim_date description), warehouse/macros/ml_included_run_statuses.sql (new),
+warehouse/tests/generic/expression_is_true.sql (new), warehouse/tests/core/
+{assert_fact_offer_snapshot_reconciles_with_raw,assert_fact_offer_snapshot_discount_rules,
+assert_fact_offer_snapshot_best_seller_matches_highlights,assert_ml_dims_cover_their_sources}.sql
+(new), warehouse/tests/core/assert_dim_date_holiday_flag_matches_calendar.sql,
+warehouse/ci/{fixture_db.py,ml_fixture_days.py (new)}, warehouse/fixtures/README.md,
+warehouse/README.md, tests/warehouse/test_fixture_db.py, docs/DATA_CONTRACT.md (§3),
+docs/DECISIONS.md (ADR-019), docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-05 — orchestrator — 2.1 live on Neon
 Done: PR #15 merged (67c1073) after two review rounds, both with a dbt build on the real Olist data
