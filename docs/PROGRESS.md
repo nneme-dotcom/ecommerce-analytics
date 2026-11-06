@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** merge of 2.2 (ML price-history model, branch `warehouse/ml-price-model`, approved; review round 1 fixes ready, not committed), then 2.3 marts. 2.7 (ML raw storage ≈ 1 GB a year vs Neon's 1 GB) needs an owner decision. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** merge of 2.2 (ML price-history model, branch `warehouse/ml-price-model`, in review: round 1 findings fixed in 6a367ec; round 2 REQUEST CHANGES (M1: the fixture build's four warnings were never checked by name) addressed below, re-review pending), then 2.3 marts. 2.7 (ML raw storage ≈ 1 GB a year vs Neon's 1 GB) needs an owner decision. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -97,8 +97,8 @@ warehouse/ci/{fixture_db.py,ml_fixture_days.py (new)}, warehouse/fixtures/README
 warehouse/README.md, tests/warehouse/test_fixture_db.py, docs/DATA_CONTRACT.md (§3),
 docs/DECISIONS.md (ADR-019), docs/PLAN.md, docs/PROGRESS.md
 
-**Review round 1 (2026-11-06, PR #17 approved after a real-data run, PASS=364 WARN=0; six
-findings fixed, not committed).** (M1) **NULL `seller_id` / `price` / `currency_id`** (§1b allows
+**Review round 1 (2026-11-06, PR #17 reviewed after a real-data run, PASS=364 WARN=0; six
+findings, fixed in 6a367ec).** (M1) **NULL `seller_id` / `price` / `currency_id`** (§1b allows
 them) are handled like a NULL `item_id`: the fact leaves out an offer missing any of the four,
 each is a staging `not_null` **warning** on `stg_mercadolibre__offers` (never a red daily build,
 never a silent drop), the fact's `not_null` tests stay errors (the filter guarantees them), and
@@ -134,6 +134,54 @@ _core__ml_models.yml,_core__ml_unit_tests.yml}, warehouse/models/staging/mercado
 {assert_fact_offer_snapshot_reconciles_with_raw,assert_fact_offer_snapshot_discount_rules}.sql,
 warehouse/ci/ml_fixture_days.py, warehouse/fixtures/README.md, tests/warehouse/test_fixture_db.py,
 docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-019), docs/PLAN.md (2.7), docs/PROGRESS.md
+
+**Review round 2 (2026-11-06, PR #17 REQUEST CHANGES on one point; fixed on the branch, re-review
+pending).** (M1) `dbt build` exits 0 on warnings and the fixture build's WARN=4 was only a
+count, so a swapped or missing warning could hide behind it. New checker
+`python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json`
+(CI `dbt` job, step "Check the expected warnings", right after the fixture `dbt build`): exit 1
+unless the tests with status `warn` are exactly `EXPECTED_WARNINGS` (the four
+`not_null_stg_mercadolibre__offers_{item_id,seller_id,price,currency_id}`), each with
+`failures == 1`, and no node is `fail` / `error` / `runtime error` / `skipped` (skipped added:
+dbt skips only below a failure). Messages name node ids, statuses and counts only, never dbt's
+`message` or SQL; root causes first, at most 20 lines (as `warehouse_report`). Tests match on
+the name part of the `unique_id` (`test.<pkg>.<name>.<hash>`), so the hash suffix does not
+matter. The expected set lives in `warehouse/ci/ml_fixture_days.py`, next to O8–O11
+(`MALFORMED_OFFER_COLUMNS` → `EXPECTED_WARNINGS`). The parsing mirrors
+`scripts.warehouse_report.dbt_result_counts` (plus `failures`) instead of importing it, which
+would pull `ingestion.db` into a JSON check. 36 pytest cases on synthetic `run_results.json`
+(`tests/warehouse/test_expected_warnings.py`, no dbt or DB needed, so they also run in the
+`python` job): exact set passes; each of the four missing, an expected test passing, three
+extra warnings (incl. a model with a matching name), a same-count swap, failures 0/2/17/None,
+a duplicate, fail/error/runtime error/skipped on a test/model/unit test (dbt's message never
+printed), an expected test turned `fail`, the output cap, unreadable/empty/absent files and the
+usage error each give the right exit code and message. (L1) wording above fixed. (L3) ADR-019:
+a non-positive `price` or an unexpected `currency_id` stays a hard failure on purpose (the
+fact's `positive` / `accepted_values` [ARS, USD] errors), because it violates the contract
+rather than being a missing value; the ADR's CI-fixtures bullet names the checker.
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, free port, cluster
+deleted afterwards; no Neon, no real data): `ruff check .` clean; fresh DB `fixture_db load` →
+`dbt build` PASS=363 WARN=4 ERROR=0 → `expected_warnings` ok (exit 0) → `fixture_db check` ok
+(29 raw relations unchanged); full `pytest` 440 passed, 2 skipped (Olist real data); `pytest
+tests/warehouse` 78 passed; actionlint 1.7.7 (release checksum verified) clean on ci.yml.
+End-to-end negative checks on real builds, each exit 1 naming the right ids: O9 removed (WARN=3:
+missing `..._seller_id`, status pass); `price` not_null severity error (ERROR=1, SKIP=62: the
+`fail` listed first, capped at 20 lines); **same-count swap** (O9 removed and the highlights
+`type` list narrowed to [PRODUCT, USER_PRODUCT], so the ITEM highlight warns: still WARN=4,
+one failure each, which a count check accepts): unexpected
+`accepted_values_stg_mercadolibre__highlights_type__PRODUCT__USER_PRODUCT`, missing `..._seller_id`.
+Gotchas for the next agent: a new fixture case that adds a warning must add it to
+`EXPECTED_WARNINGS` (with its failure count) or CI fails; the checker is for the **fixture**
+build only (a real/Neon build expects WARN=0 and is reported by `warehouse_report`, not
+checked by this). Mutating the fixtures needs a fresh DB: `fixture_db load` refuses a database
+with more rows than the (smaller) fixtures, by design.
+Proposed CLAUDE.md Commands row (orchestrator), after the dbt build row:
+- `| Check the fixture dbt build warned about exactly the expected tests (CI, after the fixture build) | python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json |`
+and the exit-code line "`expected_warnings` exits 0 ok, 1 unexpected/missing warning, wrong
+failure count, a failing/skipped node or unreadable run_results, 2 usage error".
+Files touched (round 2): warehouse/ci/expected_warnings.py (new), warehouse/ci/ml_fixture_days.py
+(`EXPECTED_WARNINGS`), tests/warehouse/test_expected_warnings.py (new), .github/workflows/ci.yml,
+warehouse/fixtures/README.md, docs/DECISIONS.md (ADR-019), docs/PROGRESS.md
 
 ### 2026-11-05 — orchestrator — 2.1 live on Neon
 Done: PR #15 merged (67c1073) after two review rounds, both with a dbt build on the real Olist data

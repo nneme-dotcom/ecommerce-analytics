@@ -512,8 +512,11 @@ sales data; the best-seller position is the demand proxy. The ECB publishes no A
   §1b allows NULL in each. Each NULL is a staging **warning** (a hard failure would turn one
   malformed API row into a red daily build; a silent drop would hide a payload change), the
   rows stay in staging, and the fact's `not_null` tests on the four stay errors because the
-  filter guarantees them. Reconciliation is per day against raw, read from the source, with
-  the same four-column rule, so any other dropped row fails it. Considered (review round 1):
+  filter guarantees them. A non-positive `price` or an unexpected `currency_id` stays a hard
+  failure on purpose (the fact's `positive` and `accepted_values` [ARS, USD] tests are errors):
+  it violates the contract rather than being a missing value. Reconciliation is per day
+  against raw, read from the source, with the same four-column rule, so any other dropped row
+  fails it. Considered (review round 1):
   keeping such rows and downgrading the fact's `not_null` tests to warnings; rejected because
   every price metric and the per-currency rank would then have to filter NULLs themselves,
   and a NULL seller would be a fact row without a dimension member.
@@ -543,7 +546,10 @@ sales data; the best-seller position is the demand proxy. The ECB publishes no A
 - **CI fixtures.** `fixture_db load` writes three synthetic day folders (success, partial,
   failed) with the real snapshot writer from `tests/mercadolibre/ml_fixtures.py` and loads them
   with `ingestion.mercadolibre.load` (ADR-016); fixed run ids and timestamps make the files
-  byte-identical. dbt unit tests feed `stg_mercadolibre__runs` / `__offers` as SQL fixtures,
+  byte-identical. Their four malformed offers give the fixture build exactly four staging
+  warnings; CI pins them by test name and failure count (`warehouse.ci.expected_warnings`,
+  review round 2), because `dbt build` exits 0 on warnings and a count alone can hide a
+  swapped one. dbt unit tests feed `stg_mercadolibre__runs` / `__offers` as SQL fixtures,
   because dbt-postgres types dict fixtures from information_schema, which reports `text[]` as
   the uncastable `ARRAY`.
 

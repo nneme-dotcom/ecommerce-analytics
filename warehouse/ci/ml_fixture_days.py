@@ -19,7 +19,8 @@ warehouse/fixtures/README.md):
   a price drop, original < price); sellers 101 (two states on one day) and 102 (moved); four
   malformed offers of P1 (O8 without item_id, O9 without seller_id, O10 without price, O11
   without currency_id): kept in staging, left out of the fact, and the reason the fixture
-  ``dbt build`` reports exactly WARN=4 (the four staging not_null warnings, ADR-019).
+  ``dbt build`` reports exactly WARN=4 (the four staging not_null warnings, ADR-019;
+  ``EXPECTED_WARNINGS`` below, checked by ``warehouse.ci.expected_warnings``).
 - 2026-11-05 ``failed``: no category captured, trends only: left out of core, still a day of
   dim_date.
 """
@@ -41,6 +42,14 @@ P1, P2, P3, P4, P5 = (f"MLA9000000{n}" for n in range(1, 6))
 SUCCESS_DAY, PARTIAL_DAY, FAILED_DAY = "2026-11-03", "2026-11-04", "2026-11-05"
 DAYS = (SUCCESS_DAY, PARTIAL_DAY, FAILED_DAY)
 EXPECTED_STATUS = {SUCCESS_DAY: "success", PARTIAL_DAY: "partial", FAILED_DAY: "failed"}
+
+# The only warnings the fixture ``dbt build`` may report, and how many failing rows each has: one
+# per malformed offer of the partial day (O8–O11 in ``_day_content``). Checked after the CI build
+# by ``python -m warehouse.ci.expected_warnings``; change it together with those offers.
+MALFORMED_OFFER_COLUMNS = ("item_id", "seller_id", "price", "currency_id")
+EXPECTED_WARNINGS: dict[str, int] = {
+    f"not_null_stg_mercadolibre__offers_{column}": 1 for column in MALFORMED_OFFER_COLUMNS
+}
 
 
 def _payloads() -> ModuleType:
@@ -157,6 +166,7 @@ def _day_content(fx: ModuleType, day: str) -> dict[str, Any]:
                     ),
                     # Malformed offers (one missing column each): staging warns, the fact leaves
                     # them out. Seller 101 (no state in the template), so no dimension changes.
+                    # Keep EXPECTED_WARNINGS (top of this module) in sync.
                     _offer(fx, 8, item_id=None, seller_id=101),
                     _offer(fx, 9, seller_id=None),
                     _offer(fx, 10, price=None, seller_id=101),

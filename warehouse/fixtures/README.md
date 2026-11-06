@@ -73,6 +73,13 @@ on every run. Products P1–P5 are `MLA90000001`–`MLA90000005`, offer O*n* is 
 (one malformed offer each, above). Any other warning, or a fifth, is a regression. The real
 data has none of these offers, so a real build has WARN=0.
 
+`dbt build` exits 0 on warnings, so CI checks the set, not the count: right after the build,
+`python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json`
+fails (exit 1, naming the unexpected or missing test ids; never row data) unless the tests with
+status `warn` are exactly `EXPECTED_WARNINGS`, each with `failures == 1`, and no node has status
+`fail`, `error`, `runtime error` or `skipped`. The expected set lives in
+`warehouse/ci/ml_fixture_days.py`, next to the malformed offers: change both together.
+
 The exact rules (failed days and offers missing `item_id`, `seller_id`, `price` or
 `currency_id` left out, discount, best seller, rank, fulfillment and deal flags, type 1) are
 also pinned by the dbt unit tests in `models/core/_core__ml_unit_tests.yml`.
