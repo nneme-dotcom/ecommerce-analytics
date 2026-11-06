@@ -16,7 +16,10 @@ warehouse/fixtures/README.md):
   fulfillment offer; a listing-only category (MLA3502).
 - 2026-11-04 ``partial``: category MLA1652 failed; the P2 and P5 detail calls failed (their
   offers are kept; P5 never has details); offers O1, O2, O4, O5 again (two days of one offer:
-  a price drop, original < price); sellers 101 (two states on one day) and 102 (moved).
+  a price drop, original < price); sellers 101 (two states on one day) and 102 (moved); four
+  malformed offers of P1 (O8 without item_id, O9 without seller_id, O10 without price, O11
+  without currency_id): kept in staging, left out of the fact, and the reason the fixture
+  ``dbt build`` reports exactly WARN=4 (the four staging not_null warnings, ADR-019).
 - 2026-11-05 ``failed``: no category captured, trends only: left out of core, still a day of
   dim_date.
 """
@@ -152,6 +155,12 @@ def _day_content(fx: ModuleType, day: str) -> dict[str, Any]:
                         original_price=98000,  # original < price
                         seller_address={"state": {"name": "Mendoza"}},
                     ),
+                    # Malformed offers (one missing column each): staging warns, the fact leaves
+                    # them out. Seller 101 (no state in the template), so no dimension changes.
+                    _offer(fx, 8, item_id=None, seller_id=101),
+                    _offer(fx, 9, seller_id=None),
+                    _offer(fx, 10, price=None, seller_id=101),
+                    _offer(fx, 11, currency_id=None, seller_id=101),
                 ],
                 P5: [_offer(fx, 7, price=75000, original_price=None)],
                 P3: [],

@@ -1,11 +1,13 @@
 -- Grain: one row per offer (item_id listed on catalog product_id) per snapshot_date, for the
 -- days whose run status is success or partial (ADR-007, ADR-019); failed days are left out.
--- Real data: 9,439 rows over 4 days (= raw offers of those days). Offers without an item_id are
--- left out (they cannot be followed across days; warned in staging).
+-- Real data: 9,439 rows over 4 days (= raw offers of those days). Offers missing item_id,
+-- seller_id, price or currency_id are left out (they cannot be followed across days, joined to
+-- a seller or priced; each NULL is a staging warning, never a failed build; ADR-019).
 -- Prices stay in the offer's currency_id (ARS): there is no ECB ARS rate (ADR-012).
--- Discount only where original_price > price. Best-seller columns = the product's best
--- (lowest) position that day across the categories ranking it; the position is a demand proxy,
--- not sales. Offer-level third-party data: never exposed by the API (ADR-003, ADR-014).
+-- Discount only where original_price > price; discount_pct is the unrounded ratio, so it is
+-- > 0 whenever has_discount (rounding would turn a tiny discount into 0; marts round for
+-- display). Best-seller columns = the product's best (lowest) position that day across the
+-- categories ranking it; the position is a demand proxy, not sales. Offer-level third-party data: never exposed by the API (ADR-003, ADR-014).
 
 with runs as (
 
@@ -79,7 +81,12 @@ included_offers as (
     from offers
     inner join included_days
         on included_days.snapshot_date = offers.snapshot_date
+    -- The offer columns the fact needs (ADR-019). The reconciliation test applies the same
+    -- rule to raw, so a row dropped here for any other reason fails it.
     where offers.item_id is not null
+        and offers.seller_id is not null
+        and offers.price is not null
+        and offers.currency_id is not null
 
 ),
 
@@ -134,7 +141,7 @@ final as (
         has_discount,
         case when has_discount then original_price - price end as discount_amount,
         case
-            when has_discount then round((original_price - price) / original_price, 4)
+            when has_discount then (original_price - price) / original_price
         end as discount_pct,
         condition,
         listing_type_id,

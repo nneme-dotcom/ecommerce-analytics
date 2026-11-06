@@ -1,6 +1,6 @@
 -- Grain: one row per Mercado Libre category (category_id) seen on an included day (run status
 -- success or partial, ADR-019) as a best-seller category (highlights, any type) or as an
--- offer's own category_id (usually a leaf below the ranked category). Real data: 23 rows.
+-- offer's own category_id (usually a leaf below the ranked category). Real data: 19 rows.
 -- No category name: the snapshot does not call /categories/{id}, and none is invented here.
 
 with runs as (

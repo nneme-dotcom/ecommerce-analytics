@@ -42,6 +42,7 @@ Order: 2.0 and 2.5 in parallel → 2.6 (needs the owner's Neon setup) → 2.1 �
 | 2.2 | ML price-history model (fact_offer_snapshot, dim_ml_product, dim_ml_seller, dim_ml_category) | analytics-engineer | in review | Declares the `raw_mercadolibre` source; one row per offer per day; tests pass; not exposed by the API (ADR-014) |
 | 2.3 | Business metric marts (revenue, delivery delay, review impact, cohorts, price dynamics) | analytics-engineer | todo | Each metric has a definition in DATA_CONTRACT |
 | 2.4 | API serving the marts | backend | todo | Typed endpoints, tests, OpenAPI docs; connects with a read-only role limited to `marts`, never the loader credential (ADR-014) |
+| 2.7 | ML raw storage growth (raw offers ≈1 GB/yr vs Neon free 1 GB) | data-engineer | todo | Owner-approved option (trim/compress `payload`, retention window in Neon with the data repo as system of record per ADR-014, or a paid plan) implemented; `pg_database_size` stays under 80 % for 12 months of projected growth |
 
 ## Phase 3 — Dashboard
 

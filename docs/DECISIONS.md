@@ -506,13 +506,22 @@ sales data; the best-seller position is the demand proxy. The ECB publishes no A
   days, e.g. one category's 500) and keeping only the categories in `runs.categories` (the
   offers of a captured category's products are what is there; nothing to filter).
 - **Grain and key.** `fact_offer_snapshot` = one row per (`snapshot_date`, `product_id`,
-  `item_id`), Mercado Libre's natural ids (as ADR-018). An offer without `item_id` cannot be
-  followed across days, so it is left out of the fact and warned about in staging (a hard
-  failure would turn one malformed API row into a red daily build; a silent drop would hide a
-  payload change). Reconciliation is per day against raw, read from the source.
+  `item_id`), Mercado Libre's natural ids (as ADR-018). **Offers missing a column the fact
+  needs are left out, one rule for all four:** `item_id` (cannot be followed across days),
+  `seller_id` (no seller), `price` or `currency_id` (cannot be priced, compared or ranked).
+  §1b allows NULL in each. Each NULL is a staging **warning** (a hard failure would turn one
+  malformed API row into a red daily build; a silent drop would hide a payload change), the
+  rows stay in staging, and the fact's `not_null` tests on the four stay errors because the
+  filter guarantees them. Reconciliation is per day against raw, read from the source, with
+  the same four-column rule, so any other dropped row fails it. Considered (review round 1):
+  keeping such rows and downgrading the fact's `not_null` tests to warnings; rejected because
+  every price metric and the per-currency rank would then have to filter NULLs themselves,
+  and a NULL seller would be a fact row without a dimension member.
 - **Measures.** Prices as published, in `currency_id`, never converted (no ARS rate); the
   discount exists only where `original_price > price` (an "original" at or below the price is
-  not a discount, and such rows exist), as an amount and a 4-decimal fraction.
+  not a discount, and such rows exist), as an amount and an **unrounded** fraction (review
+  round 1: 4-decimal rounding gave `discount_pct = 0.0000` with `has_discount` true for a
+  discount below 0.005 %; display rounding belongs to marts).
   Best-seller columns pick the product's lowest position across the categories ranking it that
   day (ties by `category_id` byte order) and keep the number of ranking categories, so the fact
   stays one row per offer. Two window measures per product and day, `offers_in_product` and
@@ -538,9 +547,14 @@ sales data; the best-seller position is the demand proxy. The ECB publishes no A
   because dbt-postgres types dict fixtures from information_schema, which reports `text[]` as
   the uncastable `ARRAY`.
 
-**Consequences.** The fact is rebuilt in full by every `dbt build` (≈ 190 MB a year at today's
-volume, measured ≈ 220 bytes a row): before it outgrows Neon's 1 GB, make it incremental by
-`snapshot_date` (the daily load only changes new or re-run days, ADR-015). `dim_date` now
+**Consequences.** The fact is rebuilt in full by every `dbt build`; that is cheap (≈ 0.15 s
+and ≈ 2 MB for 4 real days, ≈ 220 bytes a row, ≈ 190 MB a year at today's volume), so it stays
+a table, not an incremental model. **Storage pressure comes from raw:**
+`raw_mercadolibre.offers` measured ≈ 11 MB for the same 4 days (≈ 2.7 MB a day, mostly
+`payload`), ≈ 1 GB a year, the whole Neon free plan (ADR-014). Handling that is PLAN 2.7
+(owner decision: trim/compress `payload`, a retention window in Neon with the data repo as
+system of record, or a paid plan); until then the job summary's 80 % warning (ADR-017) is the
+alarm. `dim_date` now
 depends on `raw_mercadolibre`, so a database without that schema fails the build (CI and Neon
 always load it). Staging views on `raw_mercadolibre` make a loader re-create on drift fail (as
 for Olist, by design). Count-based ML metrics must say whether they use partial days. Prices in

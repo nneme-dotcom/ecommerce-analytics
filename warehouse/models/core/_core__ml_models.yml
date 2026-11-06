@@ -9,9 +9,12 @@ models:
   - name: fact_offer_snapshot
     description: >
       Grain: one row per offer (item_id on catalog product_id) per snapshot_date, success and
-      partial days only (run_status says which). Prices in the offer's currency_id (ARS), not
-      converted (no ECB ARS rate, ADR-012). Discount only where original_price > price. The
-      best-seller position is a demand proxy, not sales.
+      partial days only (run_status says which). Offers missing item_id, seller_id, price or
+      currency_id are left out (staging warns; ADR-019), so the not_null tests on those four
+      columns check the filter and cannot fail on a malformed API offer. Prices in the offer's
+      currency_id (ARS), not converted (no ECB ARS rate, ADR-012). Discount only where
+      original_price > price; discount_pct unrounded. The best-seller position is a demand
+      proxy, not sales.
     data_tests:
       - unique_combination_of_columns:
           arguments:
@@ -32,8 +35,10 @@ models:
                 to: ref('dim_ml_product')
                 field: product_id
       - name: item_id
+        description: Never NULL - offers without one are left out (warned in staging).
         data_tests: [not_null]
       - name: seller_id
+        description: Never NULL - offers without one are left out (warned in staging).
         data_tests:
           - not_null
           - relationships:
@@ -53,11 +58,14 @@ models:
               arguments:
                 values: [success, partial]
       - name: price
+        description: Never NULL - offers without one are left out (warned in staging).
         data_tests: [not_null, positive]
       - name: original_price
         data_tests: [positive]
       - name: currency_id
-        description: ARS on the real data; MLA also allows USD listings. Never aggregate across currencies.
+        description: >
+          ARS on the real data; MLA also allows USD listings. Never aggregate across currencies.
+          Never NULL - offers without one are left out (warned in staging).
         data_tests:
           - not_null
           - accepted_values:

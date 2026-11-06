@@ -537,7 +537,7 @@ columns (as Olist) and drop `payload` (the full line stays in raw only) and, in 
 | `stg_mercadolibre__runs` | `snapshot_date` | `snapshot_date` date, `run_id` uuid, `status` text, `started_at`, `finished_at` timestamptz, `site_id` text, `categories`, `categories_requested` text[], `requests_made`, `request_cap` integer, `request_cap_reached` boolean, `row_counts`, `skipped_highlights` jsonb, `products_without_offers` integer, `errors` jsonb, `load_id` uuid | key unique + not null; `run_id` unique + not null; `status` in (`success`, `partial`, `failed`) |
 | `stg_mercadolibre__highlights` | (`snapshot_date`, `category_id`, `product_id`); also unique (`snapshot_date`, `line_no`) | `snapshot_date` date, `run_id` uuid, `line_no` integer, `captured_at` timestamptz, `category_id`, `product_id` text, `position` integer, `type` text | both keys unique; keys not null; `snapshot_date` → runs; `position` > 0; `type` in (`PRODUCT`, `USER_PRODUCT`, `ITEM`) as a **warning** (the writer keeps any type; only `PRODUCT` is used downstream) |
 | `stg_mercadolibre__products` | (`snapshot_date`, `product_id`) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `product_id`, `name`, `domain_id`, `family_name`, `status`, `brand`, `model`, `permalink` (text) | key unique + not null; `snapshot_date` → runs |
-| `stg_mercadolibre__offers` | (`snapshot_date`, `product_id`, `item_id`) (§1b: unique in staging, not in raw) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `product_id`, `item_id` text, `seller_id`, `official_store_id` bigint, `price`, `original_price` numeric, `currency_id`, `condition`, `listing_type_id`, `category_id` text, `free_shipping` boolean, `logistic_type`, `shipping_mode` text, `deal_ids`, `tags` text[], `seller_state` text | key unique; `snapshot_date`, `product_id` not null; `item_id` not null as a **warning** (an offer without `item_id` cannot be followed across days and is left out of `core`); `snapshot_date` → runs |
+| `stg_mercadolibre__offers` | (`snapshot_date`, `product_id`, `item_id`) (§1b: unique in staging, not in raw) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `product_id`, `item_id` text, `seller_id`, `official_store_id` bigint, `price`, `original_price` numeric, `currency_id`, `condition`, `listing_type_id`, `category_id` text, `free_shipping` boolean, `logistic_type`, `shipping_mode` text, `deal_ids`, `tags` text[], `seller_state` text | key unique; `snapshot_date`, `product_id` not null; `item_id`, `seller_id`, `price`, `currency_id` not null as **warnings** (§1b allows NULL in all four; an offer missing one is left out of `core`, see `fact_offer_snapshot`, and one malformed API offer must never fail the daily build, ADR-019); `snapshot_date` → runs |
 | `stg_mercadolibre__trends` | (`snapshot_date`, `position`) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `position` integer, `keyword`, `url` text | key unique + not null; `snapshot_date` → runs |
 
 ### `core` models — Olist star schema (task 2.1, ADR-018)
@@ -722,29 +722,39 @@ included `snapshot_date`.
 |--------|------|------------|
 | `snapshot_date` | date | FK → `dim_date` |
 | `product_id` | text | FK → `dim_ml_product` |
-| `item_id` | text | the listing; offers without `item_id` are left out (they cannot be followed across days; warned in staging) |
-| `seller_id` | bigint | FK → `dim_ml_seller` |
+| `item_id` | text | the listing; never NULL (offers without one are left out, see below) |
+| `seller_id` | bigint | FK → `dim_ml_seller`; never NULL (offers without one are left out) |
 | `listing_category_id` | text | the offer's own `category_id` (usually a leaf below the ranked category); FK → `dim_ml_category` |
 | `run_status` | text | `success` · `partial` (of that day's run) |
 | `captured_at` | timestamptz | when the product's first offers page was received |
-| `price`, `original_price` | numeric | as published, in `currency_id`; `original_price` is the struck-through "before" price, NULL when the offer shows none |
-| `currency_id` | text | `ARS` (or `USD`) |
+| `price`, `original_price` | numeric | as published, in `currency_id`; `price` never NULL (offers without one are left out); `original_price` is the struck-through "before" price, NULL when the offer shows none |
+| `currency_id` | text | `ARS` (or `USD`); never NULL (offers without one are left out) |
 | `has_discount` | boolean | `original_price > price` (false when `original_price` is NULL or ≤ `price`) |
 | `discount_amount` | numeric | `original_price - price`, **only where `has_discount`**, else NULL |
-| `discount_pct` | numeric | `(original_price - price) / original_price`, rounded to 4 decimals (0.25 = 25 %), only where `has_discount`, else NULL |
+| `discount_pct` | numeric | `(original_price - price) / original_price`, **not rounded** (0.25 = 25 %), only where `has_discount`, else NULL. Unrounded so that it is > 0 whenever `has_discount` is true: 4-decimal rounding turned a discount below 0.005 % (e.g. 0.01 on 1,000,000) into `0.0000`; marts and the dashboard round for display |
 | `condition`, `listing_type_id` | text | as in raw (`new`, `gold_pro`, ...) |
 | `official_store_id` | bigint | NULL = not sold through an official store (an attribute of the offer: one seller can list with and without a store) |
 | `is_official_store` | boolean | `official_store_id is not null` |
 | `free_shipping` | boolean | as in raw |
 | `logistic_type`, `shipping_mode` | text | as in raw (`fulfillment`, `cross_docking`, ... / `me2`, ...) |
 | `is_fulfillment` | boolean | `logistic_type = 'fulfillment'` (stock held by Mercado Libre, "Full"); NULL when `logistic_type` is NULL |
-| `has_deal` | boolean | the offer has at least one `deal_ids` entry |
+| `has_deal` | boolean | the offer has at least one `deal_ids` entry (false for an empty list; NULL only when `deal_ids` is NULL, which the writer never produces, §1: null → `[]`) |
 | `is_best_seller` | boolean | the product was in that day's best-seller highlights (type `PRODUCT`) of at least one category |
 | `best_seller_category_id` | text | the category where it ranked best that day (lowest `position`; ties → lowest `category_id` in byte order); FK → `dim_ml_category`; NULL if not ranked |
 | `best_seller_position` | integer | that position (1 = top); NULL if not ranked or the position was missing |
 | `best_seller_category_count` | integer | number of categories ranking the product that day (0 if none) |
 | `offers_in_product` | integer | offers of the same product that day (rows of this fact) |
 | `price_rank_in_product` | integer | `rank()` of `price` among the product's offers that day in the same `currency_id` (1 = cheapest; ties share a rank) |
+
+**Offers left out (ADR-019).** An offer whose `item_id`, `seller_id`, `price` or `currency_id`
+is NULL in raw (§1b allows it: the writer keeps such an offer, and typing is lenient) is **not
+in the fact**: without `item_id` it cannot be followed across days, without `seller_id` it has
+no seller, without `price` or `currency_id` it cannot be priced, compared or ranked. Each of
+the four is a staging **warning** (`stg_mercadolibre__offers`), never an error, so one
+malformed API offer cannot turn the daily build red, and never a silent drop either. The rows
+stay in staging and raw; `offers_in_product` and `price_rank_in_product` count the fact's rows
+only; the dimensions still take their members from every offer (so `dim_ml_product.days_with_offers`
+counts such an offer). The real data had none (4 days, 2026-11-03..06).
 
 Caveats: **the best-seller position is a demand proxy, not sales** (the API has no units
 data); positions are comparable within a category and day only. The snapshot job follows only
@@ -761,10 +771,13 @@ Tests: key unique; keys, `seller_id`, `run_status`, `price`, `currency_id`, `has
 category); `run_status` in (`success`, `partial`); `currency_id` in (`ARS`, `USD`); `price` > 0,
 `original_price` > 0; `price_rank_in_product` between 1 and `offers_in_product`; discount rules
 (singular `assert_fact_offer_snapshot_discount_rules`: `has_discount` exactly when
-`original_price > price`, amount > 0 and 0 ≤ pct < 1 then, both NULL otherwise);
-**row-count reconciliation per day** (singular `assert_fact_offer_snapshot_reconciles_with_raw`:
-for every `snapshot_date`, fact rows = raw `offers` rows with an `item_id` on an included day,
-and no fact row on any other day); best-seller columns re-derived from the highlights (singular
+`original_price > price`, amount > 0, 0 < pct < 1 and pct = the unrounded ratio then, both
+NULL otherwise); **row-count reconciliation per day** (singular
+`assert_fact_offer_snapshot_reconciles_with_raw`: for every `snapshot_date`, fact rows = raw
+`offers` rows with a non-NULL `item_id`, `seller_id`, `price` and `currency_id` (empty text
+counts as NULL, as in staging) on an included day, and no fact row on any other day). The
+`not_null` tests on `item_id`, `seller_id`, `price` and `currency_id` stay errors: the model's
+filter guarantees them, so they fail only if the filter is broken, never on API data); best-seller columns re-derived from the highlights (singular
 `assert_fact_offer_snapshot_best_seller_matches_highlights`). Unit test
 `fact_offer_snapshot_status_discount_rank_and_best_seller`.
 
@@ -796,8 +809,13 @@ null; at least one flag true; coverage (singular).
 
 Storage, measured on the 4 real days in a throwaway PostgreSQL 16 (2026-11-06): `fact_offer_snapshot`
 2.0 MB for 9,439 rows (≈ 220 bytes a row, no indexes), the three dimensions < 150 kB, `dim_date`
-0.5 MB. At ≈ 2.4 k offers a day that is ≈ 0.85 M fact rows and ≈ 190 MB a year, on top of raw
-`offers` (ADR-019 consequences: Neon's 1 GB plan).
+0.5 MB; a full rebuild of the fact takes ≈ 0.15 s. **The growth that matters is raw, not the
+fact:** `raw_mercadolibre.offers` is ≈ 11 MB for the same 4 days (≈ 2.7 MB a day, mostly the
+`payload` jsonb), i.e. **≈ 1 GB a year**, Neon's whole free-plan storage (ADR-014), against
+≈ 190 MB a year for the fact. Making the fact incremental would save seconds, not storage, so
+it is not planned; the raw growth is PLAN 2.7 (trim or compress `payload`, a retention window
+in Neon with the data repo as the system of record, or a paid plan; owner decision). The
+warehouse job summary warns at 80 % of 1 GB (ADR-017).
 
 ---
 

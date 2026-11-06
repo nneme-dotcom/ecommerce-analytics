@@ -95,7 +95,27 @@ models:
       - name: item_id
         description: >
           Nullable in raw. An offer without item_id cannot be followed across days and is left
-          out of core.fact_offer_snapshot, so a NULL is a warning here (none in the real data).
+          out of core.fact_offer_snapshot, so a NULL is a warning here (none in the real data;
+          the CI fixtures have one on purpose).
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+      # seller_id, price and currency_id: nullable in raw (§1b, lenient typing). The fact needs
+      # all three (seller FK, price measures, per-currency rank), so an offer missing one is left
+      # out of core.fact_offer_snapshot like a NULL item_id, and the NULL is a warning here, never
+      # a failed daily build (ADR-019). None in the real data; the CI fixtures have one on purpose.
+      - name: seller_id
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: price
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: currency_id
         data_tests:
           - not_null:
               config:

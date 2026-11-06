@@ -7,11 +7,16 @@ version: 2
 unit_tests:
   - name: fact_offer_snapshot_status_discount_rank_and_best_seller
     description: >
-      Failed days and offers without item_id are left out; partial days are kept with their
-      run_status. Discount only where original_price > price (not when equal, lower or NULL).
-      Best seller = lowest PRODUCT position that day, NULL positions last, ties by category_id;
-      USER_PRODUCT entries never rank a product. price_rank_in_product is rank() per currency
-      (ties share a rank); offers_in_product counts every offer of the product that day.
+      Failed days and offers without item_id, seller_id, price or currency_id are left out
+      (pA's NULL item_id; pC's iS, iP, iC); partial days are kept with their run_status.
+      Discount only where original_price > price (not when equal, lower or NULL); discount_pct
+      is the unrounded ratio (pC's iX, a 0.01 discount on 1,000,000, is not 0). Best seller =
+      lowest PRODUCT position that day, NULL positions last, ties by category_id; USER_PRODUCT
+      entries never rank a product. price_rank_in_product is rank() per currency (ties share a
+      rank); offers_in_product counts the product's fact rows that day. is_fulfillment is true
+      only for fulfillment (false for cross_docking and xd_drop_off, NULL without a
+      logistic_type); has_deal is true with one or two deal ids, false for an empty list, NULL
+      when deal_ids is NULL (pB, pC).
     model: fact_offer_snapshot
     given:
       - input: ref('stg_mercadolibre__runs')
@@ -31,18 +36,24 @@ unit_tests:
               cur::text as currency_id, null::text as category_id,
               '2026-01-01 06:00:00+00'::timestamptz as captured_at, null::text as condition,
               null::text as listing_type_id, null::bigint as official_store_id,
-              null::boolean as free_shipping, null::text as logistic_type,
-              null::text as shipping_mode, null::text[] as deal_ids
+              null::boolean as free_shipping, lt::text as logistic_type,
+              null::text as shipping_mode, deals::text[] as deal_ids
           from (values
-              ('2026-01-01', 'pA', 'i1', 1, 80, 100, 'ARS'),
-              ('2026-01-01', 'pA', 'i2', 2, 80, 80, 'ARS'),
-              ('2026-01-01', 'pA', 'i3', 3, 90, null, 'ARS'),
-              ('2026-01-01', 'pA', 'iU', 4, 10, 12, 'USD'),
-              ('2026-01-01', 'pA', null, 5, 1, null, 'ARS'),
-              ('2026-01-01', 'pB', 'i4', 1, 50, 40, 'ARS'),
-              ('2026-01-02', 'pA', 'i1', 1, 70, 100, 'ARS'),
-              ('2026-01-03', 'pA', 'i1', 1, 60, 100, 'ARS')
-          ) as v (d, p, i, s, price, op, cur)
+              ('2026-01-01', 'pA', 'i1', 1, 80, 100, 'ARS', null, null),
+              ('2026-01-01', 'pA', 'i2', 2, 80, 80, 'ARS', null, null),
+              ('2026-01-01', 'pA', 'i3', 3, 90, null, 'ARS', null, null),
+              ('2026-01-01', 'pA', 'iU', 4, 10, 12, 'USD', null, null),
+              ('2026-01-01', 'pA', null, 5, 1, null, 'ARS', null, null),
+              ('2026-01-01', 'pB', 'i4', 1, 50, 40, 'ARS', 'xd_drop_off', '{D1,D2}'),
+              ('2026-01-01', 'pC', 'iF', 6, 30, null, 'ARS', 'fulfillment', '{D1}'),
+              ('2026-01-01', 'pC', 'iX', 7, 999999.99, 1000000, 'ARS', 'cross_docking', '{}'),
+              ('2026-01-01', 'pC', 'iZ', 8, 50, null, 'ARS', null, null),
+              ('2026-01-01', 'pC', 'iS', null, 20, null, 'ARS', 'fulfillment', '{D1}'),
+              ('2026-01-01', 'pC', 'iP', 9, null, 100, 'ARS', 'fulfillment', '{D1}'),
+              ('2026-01-01', 'pC', 'iC', 9, 25, null, null, 'fulfillment', '{D1}'),
+              ('2026-01-02', 'pA', 'i1', 1, 70, 100, 'ARS', null, null),
+              ('2026-01-03', 'pA', 'i1', 1, 60, 100, 'ARS', null, null)
+          ) as v (d, p, i, s, price, op, cur, lt, deals)
       - input: ref('stg_mercadolibre__highlights')
         rows:
           - {snapshot_date: '2026-01-01', category_id: C2, product_id: pA, position: 3, type: PRODUCT}
@@ -53,12 +64,15 @@ unit_tests:
           - {snapshot_date: '2026-01-03', category_id: C1, product_id: pA, position: 1, type: PRODUCT}
     expect:
       rows:
-        - {snapshot_date: '2026-01-01', item_id: i1, run_status: success, has_discount: true, discount_amount: 20, discount_pct: '0.2000', is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
-        - {snapshot_date: '2026-01-01', item_id: i2, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
-        - {snapshot_date: '2026-01-01', item_id: i3, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 3}
-        - {snapshot_date: '2026-01-01', item_id: iU, run_status: success, has_discount: true, discount_amount: 2, discount_pct: '0.1667', is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
-        - {snapshot_date: '2026-01-01', item_id: i4, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 1, price_rank_in_product: 1}
-        - {snapshot_date: '2026-01-02', item_id: i1, run_status: partial, has_discount: true, discount_amount: 30, discount_pct: '0.3000', is_best_seller: true, best_seller_category_id: C2, best_seller_position: 1, best_seller_category_count: 1, offers_in_product: 1, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i1, run_status: success, has_discount: true, discount_amount: 20, discount_pct: '0.20000000000000000000', is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i2, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i3, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 3}
+        - {snapshot_date: '2026-01-01', item_id: iU, run_status: success, has_discount: true, discount_amount: 2, discount_pct: '0.16666666666666666667', is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i4, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: false, has_deal: true, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 1, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: iF, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: true, has_deal: true, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 3, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: iX, run_status: success, has_discount: true, discount_amount: '0.01', discount_pct: '0.0000000100000000000000000000', is_fulfillment: false, has_deal: false, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 3, price_rank_in_product: 3}
+        - {snapshot_date: '2026-01-01', item_id: iZ, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: null, has_deal: null, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 3, price_rank_in_product: 2}
+        - {snapshot_date: '2026-01-02', item_id: i1, run_status: partial, has_discount: true, discount_amount: 30, discount_pct: '0.30000000000000000000', is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C2, best_seller_position: 1, best_seller_category_count: 1, offers_in_product: 1, price_rank_in_product: 1}
 
   - name: dim_ml_product_type_1_and_sources
     description: >

@@ -66,9 +66,16 @@ on every run. Products P1–P5 are `MLA90000001`–`MLA90000005`, offer O*n* is 
 | listing-only category (an offer's leaf category, never ranked) | MLA3502 (P2's offers) |
 | seller with two offers / two states on one day (lowest wins) / moved between days (latest wins) | 101 (O1, O4) / 101 on 11-04 → Buenos Aires / 102 → Mendoza |
 | type 1 product attributes (renamed on the partial day) | P1 |
+| malformed offers, one missing column each: kept in staging (warning), left out of the fact, counted out by the reconciliation test | 11-04, P1: O8 no `item_id` (seller 101), O9 no `seller_id`, O10 no `price`, O11 no `currency_id` |
 
-The exact rules (failed days and NULL `item_id` left out, discount, best seller, rank, type 1)
-are also pinned by the dbt unit tests in `models/core/_core__ml_unit_tests.yml`.
+**Expected fixture `dbt build`: WARN=4, ERROR=0.** The four warnings are exactly the staging
+`not_null` tests on `stg_mercadolibre__offers.item_id`, `seller_id`, `price` and `currency_id`
+(one malformed offer each, above). Any other warning, or a fifth, is a regression. The real
+data has none of these offers, so a real build has WARN=0.
+
+The exact rules (failed days and offers missing `item_id`, `seller_id`, `price` or
+`currency_id` left out, discount, best seller, rank, fulfillment and deal flags, type 1) are
+also pinned by the dbt unit tests in `models/core/_core__ml_unit_tests.yml`.
 
 Payments add up to price + freight per order (o8: one `not_defined` payment of 0.00). The exact
 expected outputs of the core rules are in the dbt unit tests

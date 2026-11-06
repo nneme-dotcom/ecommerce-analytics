@@ -1,6 +1,7 @@
 -- Grain: one row per offer per product per day (snapshot_date, product_id, item_id) = one
--- raw_mercadolibre.offers record. item_id is nullable in raw (the writer keeps an offer without
--- one); such rows stay here and are left out of core.fact_offer_snapshot. Prices are in the
+-- raw_mercadolibre.offers record. item_id, seller_id, price and currency_id are nullable in raw
+-- (the writer keeps such an offer); those rows stay here (each NULL is a warning test) and are
+-- left out of core.fact_offer_snapshot (ADR-019). Prices are in the
 -- offer's currency_id, exact as published.
 
 with source as (

@@ -116,6 +116,21 @@ def test_ml_fixture_days_go_through_the_real_loader(loaded, clean_db):
         " AND o.product_id = p.product_id)"
     ).fetchone()[0]
     assert no_offers > 0
+    # The malformed offers behind the fixture build's expected WARN=4 (fixtures README): one
+    # per column the fact requires, all on the partial day, each missing only that column.
+    malformed = clean_db.execute(
+        "SELECT"
+        " count(*) FILTER (WHERE item_id IS NULL),"
+        " count(*) FILTER (WHERE seller_id IS NULL),"
+        " count(*) FILTER (WHERE price IS NULL),"
+        " count(*) FILTER (WHERE currency_id IS NULL),"
+        " count(*) FILTER (WHERE item_id IS NULL OR seller_id IS NULL OR price IS NULL"
+        "   OR currency_id IS NULL),"
+        " count(DISTINCT snapshot_date) FILTER (WHERE item_id IS NULL OR seller_id IS NULL"
+        "   OR price IS NULL OR currency_id IS NULL)"
+        " FROM raw_mercadolibre.offers"
+    ).fetchone()
+    assert malformed == (1, 1, 1, 1, 4, 1), malformed
 
 
 def test_ml_fixture_days_are_reproducible(tmp_path):
