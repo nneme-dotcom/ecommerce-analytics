@@ -9,16 +9,23 @@ dbt_project.yml        project config; the folder decides the schema (+schema pe
 profiles.yml           connection, env vars only (no secrets in the repo)
 macros/                generate_schema_name: only staging, core, marts are allowed (parse time);
                        assert_node_schemas: on-run-start re-check of every node's final schema;
-                       zip_prefix: 5-digit zip prefix normalisation used by staging
+                       zip_prefix: 5-digit zip prefix normalisation used by staging;
+                       ml_included_run_statuses: ML run statuses that count in core
 models/staging/<src>/  _<src>__sources.yml (raw declarations), _<src>__models.yml (tests),
-                       stg_<src>__<entity>.sql (views, one row per raw record)
+                       stg_<src>__<entity>.sql (views, one row per raw record);
+                       sources olist, enrichment, mercadolibre
 models/core/           Olist star schema (tables): dim_date, dim_customer, dim_seller,
                        dim_product, dim_geo, fact_order_items, fact_deliveries (ADR-018);
-                       _core__models.yml (tests), _core__unit_tests.yml (dbt unit tests)
+                       _core__models.yml (tests), _core__unit_tests.yml (dbt unit tests).
+                       Mercado Libre price history: fact_offer_snapshot, dim_ml_product,
+                       dim_ml_seller, dim_ml_category (ADR-019; offer-level, never served by
+                       the API); _core__ml_models.yml, _core__ml_unit_tests.yml.
+                       dim_date is shared by both (conformed)
 tests/                 assert_sources_match_contract.sql; generic tests (tests/generic/);
                        singular core tests (tests/core/)
 fixtures/              raw data for CI (loaded by the real loaders, ADR-016; see its README)
 ci/fixture_db.py       CI helper: load fixtures / check that dbt left raw_* and public alone
+ci/ml_fixture_days.py  synthetic ML day folders, written by the real snapshot writer
 ```
 
 ## Run locally against a throwaway PostgreSQL
@@ -46,8 +53,10 @@ Profile variables (all optional): `DBT_PG_HOST` (localhost), `DBT_PG_PORT` (5432
 ## Conventions
 
 - One model per file. Staging models are named `stg_<source>__<entity>`; `core` uses `dim_<entity>`
-  and `fact_<process>` (as `core.fact_offer_snapshot` in ADR-014). The first line comment
-  states the **grain**.
+  and `fact_<process>` (as `core.fact_offer_snapshot` in ADR-014); Mercado Libre dimensions are
+  `dim_ml_<entity>`. The first line comment states the **grain**.
+- dbt unit tests: an input with a `text[]` column (`stg_mercadolibre__runs`, `__offers`) must use
+  `format: sql` (dbt-postgres types dict fixtures as `ARRAY`, which does not cast).
 - CTEs (`source` → `renamed` → ...) and window functions over nested subqueries.
 - Every model has data tests: grain uniqueness (`unique` or `unique_combination_of_columns`),
   not-null keys, `relationships`, `accepted_values`; facts and dimensions built from one raw

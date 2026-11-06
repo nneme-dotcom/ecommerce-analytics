@@ -462,8 +462,10 @@ that was attempted succeeded, and any failed load fails the run (ADR-017).
 The job summary reports row counts per raw table, ML days loaded, dbt result counts and
 `pg_database_size` (counts only). Every raw schema can be dropped and rebuilt with one `full` run.
 
-Naming: `stg_<source>__<entity>` (sources `olist`, `enrichment`), `dim_<entity>`, `fact_<process>`.
-Every model states its grain in a leading comment and in its YAML description.
+Naming: `stg_<source>__<entity>` (sources `olist`, `enrichment`, `mercadolibre`), `dim_<entity>`,
+`fact_<process>`; Mercado Libre dimensions are `dim_ml_<entity>` so they never clash with the
+Olist `dim_seller` / `dim_product` (task 2.2). Every model states its grain in a leading comment
+and in its YAML description.
 
 ### Sources
 
@@ -478,6 +480,7 @@ together.
 |------------|--------|--------|
 | `olist` | `raw_olist` | the nine tables of §2 + `_load_audit` |
 | `enrichment` | `raw_enrichment` | `fx_rates`, `public_holidays`, `_load_audit` |
+| `mercadolibre` | `raw_mercadolibre` | `runs`, `highlights`, `products`, `offers`, `trends`, `_load_audit` (task 2.2) |
 
 Source tests (only what §2/§2b guarantee): `raw_olist` data tables have none (no keys or
 constraints in raw; key tests start in `staging`). `raw_enrichment.fx_rates`: unique
@@ -486,7 +489,10 @@ constraints in raw; key tests start in `staging`). `raw_enrichment.fx_rates`: un
 loader accepts other ECB currencies via `--quotes`). `public_holidays`: not null on the required
 fields, `source` = `Nager.Date v3` (fails on the v4 migration until staging is updated, PLAN 1.7).
 Both `_load_audit` tables: unique (`load_id`, `table_name`), not null, `table_name` in the
-loader's tables.
+loader's tables. `raw_mercadolibre` (§1b): `runs.snapshot_date` unique + not null, `run_id` and
+`status` not null, `status` in (`success`, `partial`, `failed`); the four file tables unique
+(`snapshot_date`, `line_no`) (their PK) with the required columns not null; `_load_audit` unique
+(`load_id`, `snapshot_date`, `table_name`), not null, `table_name` in the five data tables.
 
 ### `staging` models (task 2.1)
 
@@ -520,6 +526,20 @@ same for every Olist model:
 | `stg_enrichment__fx_rates` | (`rate_date`, `base_currency`, `quote_currency`) | `rate_date` date, `base_currency`, `quote_currency` text, `rate` numeric | key unique; not null; base = `EUR`; `rate` > 0. No rows on weekends/TARGET holidays (carry-forward is in `core`) |
 | `stg_enrichment__public_holidays` | none: one row per raw entry | `country_code` text, `holiday_date` date, `local_name`, `holiday_name` (= raw `name`), `is_global`, `counties`, `holiday_types`, `is_fixed`, `launch_year` | required fields not null |
 
+**Mercado Libre staging (task 2.2).** Views on `raw_mercadolibre` (§1b), one row per raw
+record, every day of every run status (filtering by status happens in `core`). Raw is already
+typed, so the views keep the §1b column names and types, apply `nullif(col, '')` to text
+columns (as Olist) and drop `payload` (the full line stays in raw only) and, in `runs`,
+`file_sha256`. No business logic.
+
+| model | grain (key) | columns (type) | tests |
+|-------|-------------|----------------|-------|
+| `stg_mercadolibre__runs` | `snapshot_date` | `snapshot_date` date, `run_id` uuid, `status` text, `started_at`, `finished_at` timestamptz, `site_id` text, `categories`, `categories_requested` text[], `requests_made`, `request_cap` integer, `request_cap_reached` boolean, `row_counts`, `skipped_highlights` jsonb, `products_without_offers` integer, `errors` jsonb, `load_id` uuid | key unique + not null; `run_id` unique + not null; `status` in (`success`, `partial`, `failed`) |
+| `stg_mercadolibre__highlights` | (`snapshot_date`, `category_id`, `product_id`); also unique (`snapshot_date`, `line_no`) | `snapshot_date` date, `run_id` uuid, `line_no` integer, `captured_at` timestamptz, `category_id`, `product_id` text, `position` integer, `type` text | both keys unique; keys not null; `snapshot_date` → runs; `position` > 0; `type` in (`PRODUCT`, `USER_PRODUCT`, `ITEM`) as a **warning** (the writer keeps any type; only `PRODUCT` is used downstream) |
+| `stg_mercadolibre__products` | (`snapshot_date`, `product_id`) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `product_id`, `name`, `domain_id`, `family_name`, `status`, `brand`, `model`, `permalink` (text) | key unique + not null; `snapshot_date` → runs |
+| `stg_mercadolibre__offers` | (`snapshot_date`, `product_id`, `item_id`) (§1b: unique in staging, not in raw) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `product_id`, `item_id` text, `seller_id`, `official_store_id` bigint, `price`, `original_price` numeric, `currency_id`, `condition`, `listing_type_id`, `category_id` text, `free_shipping` boolean, `logistic_type`, `shipping_mode` text, `deal_ids`, `tags` text[], `seller_state` text | key unique; `snapshot_date`, `product_id` not null; `item_id`, `seller_id`, `price`, `currency_id` not null as **warnings** (§1b allows NULL in all four; an offer missing one is left out of `core`, see `fact_offer_snapshot`, and one malformed API offer must never fail the daily build, ADR-019); `snapshot_date` → runs |
+| `stg_mercadolibre__trends` | (`snapshot_date`, `position`) | `snapshot_date`, `run_id`, `line_no`, `captured_at`, `position` integer, `keyword`, `url` text | key unique + not null; `snapshot_date` → runs |
+
 ### `core` models — Olist star schema (task 2.1, ADR-018)
 
 Tables. **Keys are Olist's natural keys** (32-hex ids, 5-digit zip prefixes) and the calendar
@@ -530,7 +550,7 @@ raw.
 
 | model | grain (key) | expected real rows | built from |
 |-------|-------------|--------------------|------------|
-| `dim_date` | `date_day` | 1,096 (2016-01-01 .. 2018-12-31) | order timestamps, `stg_enrichment__public_holidays` |
+| `dim_date` | `date_day` | 4,018 (2016-01-01 .. 2026-12-31, since task 2.2; grows by a year when the ML snapshots enter a new year) | order timestamps, ML `snapshot_date`s, `stg_enrichment__public_holidays` |
 | `dim_customer` | `customer_unique_id` | 96,096 | customers + orders |
 | `dim_seller` | `seller_id` | 3,095 | sellers |
 | `dim_product` | `product_id` | 32,951 | products + translation |
@@ -541,17 +561,25 @@ raw.
 Storage, measured on the real load: ≈ 70 MB for all of `core` (the facts dominate), whole
 database ≈ 253 MB, against Neon's 1 GB (ADR-014). Raw geolocation is never copied into `core`.
 
-**`dim_date`**: every day from 1 January of the first year to 31 December of the last year in
-which any of the five order timestamps falls. Columns: `date_day` date, `iso_year`,
+**`dim_date`** (conformed: shared by the Olist and the Mercado Libre facts): every day from 1
+January of the first year to 31 December of the last year in which any of the five Olist order
+timestamps **or any ML `snapshot_date`** (`stg_mercadolibre__runs`, any status) falls. Since
+task 2.2 that is 2016-01-01 .. 2026-12-31 on the real data; the years between the two sources
+(2019–2025) are included so the calendar stays contiguous. Columns: `date_day` date, `iso_year`,
 `calendar_year`, `calendar_quarter`, `calendar_month` integer, `year_month` text (`YYYY-MM`),
 `month_name` text (English), `iso_week`, `iso_day_of_week` integer (1 = Monday), `day_name` text
-(English), `is_weekend` boolean, `is_br_public_holiday` boolean, `br_holiday_name` text.
+(English), `is_weekend` boolean, `is_br_public_holiday` boolean, `br_holiday_name` text,
+`is_ar_public_holiday` boolean, `ar_holiday_name` text (the last two added by task 2.2).
 `is_br_public_holiday` is true on a **nationwide public holiday**: a `BR` entry with
 `is_global` and `'Public' = any(holiday_types)` (regional entries with `counties`, and
 Optional/Bank/Observance types, never count); names of several entries on one date are joined
 with `; `. It is **NULL in a year with no BR row** in the holiday calendar (unknown, not false;
-BR is loaded for 2016–2018). Tests: `date_day` unique + not null; contiguous whole years;
-the flag follows the calendar rule (singular `assert_dim_date_holiday_flag_matches_calendar`).
+BR is loaded for 2016–2018). `is_ar_public_holiday` / `ar_holiday_name` follow the same rule
+for `AR` (loaded for 2026 → next year, so NULL for 2016–2025). Tests: `date_day` unique + not
+null; contiguous whole years; both flags follow the calendar rule (singular
+`assert_dim_date_holiday_flag_matches_calendar`); every fact date has a row (relationships
+tests). No unit test: dbt unit tests compare every output row, and the smallest output is a
+whole year.
 
 **`dim_customer`**: `customer_unique_id` text, `customer_zip_code_prefix`, `customer_city`,
 `customer_state` text, `customer_id_count` bigint, `first_purchase_at`, `last_purchase_at`
@@ -649,8 +677,145 @@ follow the table above and are NULL for non-delivered orders (singular); `delive
 outputs for the `dim_geo` rule, the FX carry-forward and look-back, the delivery metrics and
 `dim_customer`'s grain and location. **Generic tests** in `warehouse/tests/generic/`:
 `unique_combination_of_columns`, `positive`, `not_negative`, `matches_regex`, `equal_row_count`
-(row-count reconciliation, optionally against a distinct count). Singular tests in
-`warehouse/tests/core/`.
+(row-count reconciliation, optionally against a distinct count), `expression_is_true` (a row
+rule, added by 2.2). Singular tests in `warehouse/tests/core/`.
+
+### `core` models — Mercado Libre price history (task 2.2, ADR-019)
+
+Tables in `core`, built from the `stg_mercadolibre__*` views. **Offer-level, third-party data:
+these tables are never exposed by the API** (ADR-003, ADR-014). The 2.4 API reads `marts` only,
+and ML marts (2.3) publish aggregates, never one row per item or seller.
+
+Rules shared by every ML core model:
+- **Days included (ADR-007 statuses).** Only days whose `runs.status` is `success` or `partial`
+  (macro `ml_included_run_statuses`). `failed` days are left out (no category was captured; by
+  construction they hold no highlights, products or offers, but the filter is explicit).
+  **`partial` days are included**: their prices, sellers and ranks are real observations of
+  that day; what may be missing is coverage (a category whose highlights failed, a product
+  whose detail or offer pages failed, or everything after the request cap). Every fact row
+  carries `run_status`, so a metric that compares counts across days (offers per product,
+  sellers per category) filters `run_status = 'success'` or compares only products observed
+  on both days.
+- **Keys: Mercado Libre's natural ids** (`product_id`, `item_id` text, `seller_id` bigint,
+  `category_id` text) and the `date` itself; no surrogate keys (as ADR-018).
+- **Dimensions are type 1** (latest value): attributes come from the latest included day on
+  which they were observed; first/last seen dates keep a little history. Type 2 is not needed
+  yet: the daily attributes that can change and matter for pricing (price, original price,
+  shipping, official store, rank) live on the fact, per day.
+- **Currency:** amounts are in the offer's own `currency_id` (ARS on the real data; MLA also
+  allows USD listings) and are **not converted**: the ECB publishes no ARS reference rate
+  (ADR-012, §2b), so there is no EUR or USD column. Never sum or average across `currency_id`.
+- **Dates:** `snapshot_date` is the UTC day of the run and joins the conformed `core.dim_date`
+  (extended to the ML years by this task; AR holiday flag).
+
+| model | grain (key) | real rows (4 days, 2026-11-03 .. 06) | built from |
+|-------|-------------|--------------------------------------|------------|
+| `fact_offer_snapshot` | (`snapshot_date`, `product_id`, `item_id`) | 9,439 (= raw `offers` of the included days) | offers + highlights + runs |
+| `dim_ml_product` | `product_id` | 112 | products ∪ offers ∪ `PRODUCT` highlights |
+| `dim_ml_seller` | `seller_id` | 817 | offers |
+| `dim_ml_category` | `category_id` | 19 (5 ranking, 18 listing, 4 both) | highlights ∪ offers (`category_id`) |
+
+**`fact_offer_snapshot`**: one row per offer (an `item_id` listed on a catalog `product_id`) per
+included `snapshot_date`.
+
+| column | type | definition |
+|--------|------|------------|
+| `snapshot_date` | date | FK → `dim_date` |
+| `product_id` | text | FK → `dim_ml_product` |
+| `item_id` | text | the listing; never NULL (offers without one are left out, see below) |
+| `seller_id` | bigint | FK → `dim_ml_seller`; never NULL (offers without one are left out) |
+| `listing_category_id` | text | the offer's own `category_id` (usually a leaf below the ranked category); FK → `dim_ml_category` |
+| `run_status` | text | `success` · `partial` (of that day's run) |
+| `captured_at` | timestamptz | when the product's first offers page was received |
+| `price`, `original_price` | numeric | as published, in `currency_id`; `price` never NULL (offers without one are left out); `original_price` is the struck-through "before" price, NULL when the offer shows none |
+| `currency_id` | text | `ARS` (or `USD`); never NULL (offers without one are left out) |
+| `has_discount` | boolean | `original_price > price` (false when `original_price` is NULL or ≤ `price`) |
+| `discount_amount` | numeric | `original_price - price`, **only where `has_discount`**, else NULL |
+| `discount_pct` | numeric | `(original_price - price) / original_price`, **not rounded** (0.25 = 25 %), only where `has_discount`, else NULL. Unrounded so that it is > 0 whenever `has_discount` is true: 4-decimal rounding turned a discount below 0.005 % (e.g. 0.01 on 1,000,000) into `0.0000`; marts and the dashboard round for display |
+| `condition`, `listing_type_id` | text | as in raw (`new`, `gold_pro`, ...) |
+| `official_store_id` | bigint | NULL = not sold through an official store (an attribute of the offer: one seller can list with and without a store) |
+| `is_official_store` | boolean | `official_store_id is not null` |
+| `free_shipping` | boolean | as in raw |
+| `logistic_type`, `shipping_mode` | text | as in raw (`fulfillment`, `cross_docking`, ... / `me2`, ...) |
+| `is_fulfillment` | boolean | `logistic_type = 'fulfillment'` (stock held by Mercado Libre, "Full"); NULL when `logistic_type` is NULL |
+| `has_deal` | boolean | the offer has at least one `deal_ids` entry (false for an empty list; NULL only when `deal_ids` is NULL, which the writer never produces, §1: null → `[]`) |
+| `is_best_seller` | boolean | the product was in that day's best-seller highlights (type `PRODUCT`) of at least one category |
+| `best_seller_category_id` | text | the category where it ranked best that day (lowest `position`; ties → lowest `category_id` in byte order); FK → `dim_ml_category`; NULL if not ranked |
+| `best_seller_position` | integer | that position (1 = top); NULL if not ranked or the position was missing |
+| `best_seller_category_count` | integer | number of categories ranking the product that day (0 if none) |
+| `offers_in_product` | integer | offers of the same product that day (rows of this fact) |
+| `price_rank_in_product` | integer | `rank()` of `price` among the product's offers that day in the same `currency_id` (1 = cheapest; ties share a rank) |
+
+**Offers left out (ADR-019).** An offer whose `item_id`, `seller_id`, `price` or `currency_id`
+is NULL in raw (§1b allows it: the writer keeps such an offer, and typing is lenient) is **not
+in the fact**: without `item_id` it cannot be followed across days, without `seller_id` it has
+no seller, without `price` or `currency_id` it cannot be priced, compared or ranked. Each of
+the four is a staging **warning** (`stg_mercadolibre__offers`), never an error, so one
+malformed API offer cannot turn the daily build red, and never a silent drop either. The rows
+stay in staging and raw; `offers_in_product` and `price_rank_in_product` count the fact's rows
+only; the dimensions still take their members from every offer (so `dim_ml_product.days_with_offers`
+counts such an offer). The real data had none (4 days, 2026-11-03..06).
+
+Caveats: **the best-seller position is a demand proxy, not sales** (the API has no units
+data); positions are comparable within a category and day only. The snapshot job follows only
+ranked products, so on the real data every offer's product is ranked that day; the left join
+keeps an unranked product's offers with NULL rank columns. Offers are capped at 100 per product
+per day (`--max-offers-per-product`; 7 of 337 real product-days hit it), in API order, not by
+price: `offers_in_product` and `price_rank_in_product` describe the captured offers only. On a
+`partial` day a product's offer list may be incomplete.
+
+Tests: key unique; keys, `seller_id`, `run_status`, `price`, `currency_id`, `has_discount`,
+`is_official_store`, `is_best_seller`, `best_seller_category_count`, `offers_in_product`,
+`price_rank_in_product` not null; `best_seller_position` > 0; FKs to
+`dim_date`, `dim_ml_product`, `dim_ml_seller`, `dim_ml_category` (listing and best-seller
+category); `run_status` in (`success`, `partial`); `currency_id` in (`ARS`, `USD`); `price` > 0,
+`original_price` > 0; `price_rank_in_product` between 1 and `offers_in_product`; discount rules
+(singular `assert_fact_offer_snapshot_discount_rules`: `has_discount` exactly when
+`original_price > price`, amount > 0, 0 < pct < 1 and pct = the unrounded ratio then, both
+NULL otherwise); **row-count reconciliation per day** (singular
+`assert_fact_offer_snapshot_reconciles_with_raw`: for every `snapshot_date`, fact rows = raw
+`offers` rows with a non-NULL `item_id`, `seller_id`, `price` and `currency_id` (empty text
+counts as NULL, as in staging) on an included day, and no fact row on any other day). The
+`not_null` tests on `item_id`, `seller_id`, `price` and `currency_id` stay errors: the model's
+filter guarantees them, so they fail only if the filter is broken, never on API data); best-seller columns re-derived from the highlights (singular
+`assert_fact_offer_snapshot_best_seller_matches_highlights`). Unit test
+`fact_offer_snapshot_status_discount_rank_and_best_seller`.
+
+**`dim_ml_product`** (type 1): `product_id`, `product_name`, `domain_id`, `family_name`,
+`product_status`, `brand`, `model`, `permalink` (text), `has_product_details` boolean,
+`attributes_as_of`, `first_seen_date`, `last_seen_date` date, `days_ranked`, `days_with_offers`
+integer. One row per catalog product seen on an included day in `products`, `offers` or a
+`PRODUCT` highlight (a product whose detail call failed on a partial day still has offers, so
+the fact always finds it). Attributes = the whole `products` row of the latest included day that
+has one (`attributes_as_of`); NULL and `has_product_details = false` if it was never fetched.
+`days_ranked` / `days_with_offers` = included days with a `PRODUCT` highlight / with ≥ 1 offer.
+Tests: key unique + not null; flags and day counts not null; covers exactly the source ids
+(singular `assert_ml_dims_cover_their_sources`). Unit test `dim_ml_product_type_1_and_sources`.
+
+**`dim_ml_seller`** (type 1): `seller_id` bigint, `seller_state` text, `first_seen_date`,
+`last_seen_date` date, `days_seen` integer. One row per seller with an offer on an included
+day. `seller_state` = the latest included day's non-NULL `seller_state` (several offers of one
+seller on one day with different states: lowest in byte order); NULL if never given. Official
+stores are on the fact (per offer). Tests: key unique + not null; dates and `days_seen` not
+null; coverage (singular). Unit test `dim_ml_seller_latest_state`.
+
+**`dim_ml_category`**: `category_id` text, `is_ranking_category`, `is_listing_category` boolean,
+`first_seen_date`, `last_seen_date` date, `days_ranked` integer. One row per category id seen on
+an included day as a best-seller category (highlights, any type) or as an offer's
+`category_id`. `days_ranked` = included days with ≥ 1 highlight in it. **No category name**: the
+snapshot does not call `/categories/{id}`, and names are not invented here (§1 lists the five
+tracked ones; a later ingestion task can add them). Tests: key unique + not null; flags not
+null; at least one flag true; coverage (singular).
+
+Storage, measured on the 4 real days in a throwaway PostgreSQL 16 (2026-11-06): `fact_offer_snapshot`
+2.0 MB for 9,439 rows (≈ 220 bytes a row, no indexes), the three dimensions < 150 kB, `dim_date`
+0.5 MB; a full rebuild of the fact takes ≈ 0.15 s. **The growth that matters is raw, not the
+fact:** `raw_mercadolibre.offers` is ≈ 11 MB for the same 4 days (≈ 2.7 MB a day, mostly the
+`payload` jsonb), i.e. **≈ 1 GB a year**, Neon's whole free-plan storage (ADR-014), against
+≈ 190 MB a year for the fact. Making the fact incremental would save seconds, not storage, so
+it is not planned; the raw growth is PLAN 2.7 (trim or compress `payload`, a retention window
+in Neon with the data repo as the system of record, or a paid plan; owner decision). The
+warehouse job summary warns at 80 % of 1 GB (ADR-017).
 
 ---
 

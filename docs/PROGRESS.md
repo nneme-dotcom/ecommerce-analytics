@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** 2.2 ML price-history model. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** merge of 2.2 (ML price-history model, branch `warehouse/ml-price-model`, in review: round 1 findings fixed in 6a367ec; round 2 REQUEST CHANGES (M1: the fixture build's four warnings were never checked by name) addressed below, re-review pending), then 2.3 marts. 2.7 (ML raw storage ≈ 1 GB a year vs Neon's 1 GB) needs an owner decision. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,169 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-06 — analytics-engineer — 2.2 (branch `warehouse/ml-price-model`)
+Done: contract first (DATA_CONTRACT §3: `mercadolibre` source, "Mercado Libre staging", "core
+models — Mercado Libre price history", `dim_date` extended). **Source** `mercadolibre`
+(`raw_mercadolibre`: runs, highlights, products, offers, trends, `_load_audit`, every column
+and `format_type()` type, covered by `assert_sources_match_contract`; source tests = §1b keys
+and required columns). **Staging** (views, one row per raw record, every status):
+`stg_mercadolibre__runs` / `__highlights` / `__products` / `__offers` / `__trends`; §1b names,
+`nullif(text, '')`, `payload` dropped; offers key (`snapshot_date`, `product_id`, `item_id`)
+unique; NULL `item_id` and unknown highlight `type` are warnings. **Core** (tables, ADR-019):
+`fact_offer_snapshot` (one row per offer per included day; `success` + `partial` days, `failed`
+left out, `run_status` on every row; price/original price in `currency_id`, never converted
+(no ECB ARS rate, ADR-012); `has_discount` / `discount_amount` / `discount_pct` only where
+`original_price > price`; official store, free shipping, logistic type, fulfillment, deal;
+best-seller category/position = the product's lowest position that day across categories
+(ties by byte order) + `best_seller_category_count`; `offers_in_product`,
+`price_rank_in_product` per currency), `dim_ml_product`, `dim_ml_seller`, `dim_ml_category`
+(type 1, latest included value; members from every place an id appears). `dim_date` is now
+conformed: whole years of the Olist timestamps **and** the ML snapshot dates (real 2016–2026,
+4,018 rows) plus `is_ar_public_holiday` / `ar_holiday_name` (BR rule). Macro
+`ml_included_run_statuses`; generic test `expression_is_true`; singular tests
+`assert_fact_offer_snapshot_reconciles_with_raw` (per day, from the source),
+`_discount_rules`, `_best_seller_matches_highlights` (re-derived with `distinct on`, plus
+offer count / rank range), `assert_ml_dims_cover_their_sources`; the holiday-flag test now
+checks BR and AR. 3 unit tests (`_core__ml_unit_tests.yml`). **Fixtures:**
+`warehouse/ci/ml_fixture_days.py` writes 3 days (success / partial / failed) with the real
+snapshot writer from `tests/mercadolibre/ml_fixtures.py`; `fixture_db load` loads them with
+`ingestion.mercadolibre.load` (`full_reload`), counts them in the refusal guard and the
+inventory; cases in `warehouse/fixtures/README.md`. ADR-019. PLAN 2.2 → `in review`.
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, port 40549, deleted
+afterwards; no Neon): `ruff check .` clean; fresh DB `fixture_db load` → `dbt build`
+**PASS=364** (1 hook, 27 models, 7 unit tests, 329 data tests; WARN=0 ERROR=0) →
+`fixture_db check` ok (29 raw relations unchanged); `pytest tests/warehouse` 42 passed (5 new:
+ML refusal, ML loaded through the loader with its edge cases, reproducible day folders, 2 new
+`check` cases); full `pytest` 404 passed, 2 skipped (Olist real data). Fixture core rows: fact 11, products 5, sellers 6,
+categories 3, `dim_date` 3,652 (2017–2026). Negative checks: 6 model mutations (`>=` discount,
+failed days kept, reversed tie order, NULL `item_id` kept, earliest seller state, failed-day
+product rows) each fail their unit test; with unit tests excluded the data tests still catch the
+discount and tie mutations (the other four cannot occur in loader-produced data); 9 corruptions
+of the built tables (deleted fact row, wrong pct, discount on an equal price, wrong position,
+deleted seller, extra category, row on the failed day, rank out of range, unflagged AR holiday)
+each fail the intended test.
+**Real-data check** (data repo cloned to the scratchpad, 4 days 2026-11-03..06, all `success`;
+throwaway DB; clone and DB deleted; counts only): `raw_mercadolibre` loaded by the real loader
+(offers 9,439); real `raw_olist` from `olist/archive.zip`; enrichment **fixtures** (Frankfurter /
+Nager blocked by the proxy here, so Olist EUR and most holiday flags are NULL in that run).
+`dbt build` PASS=364 WARN=0 ERROR=0. `fact_offer_snapshot` 9,439 (= raw offers; 2,313 / 2,306
+/ 2,466 / 2,354 per day), `dim_ml_product` 112, `dim_ml_seller` 817, `dim_ml_category` 19 (5
+ranking, 18 listing), `dim_date` 4,018; 4,219 offers with a discount, 0 products in two
+categories on one day, 0 products without details; fact ≈ 2.0 MB (≈ 220 B a row).
+Not done / open: never run on Neon (the next `daily` run after merge builds it; expect PASS=367,
+WARN=0 since review round 1, and the counts above plus each new day). Category names are not captured (no
+`/categories/{id}` call): an ingestion task if the dashboard needs them. Trends have a staging
+view but no core model.
+Gotchas for the next agent: **ML core tables are offer-level and never exposed by the API**
+(ADR-003); 2.3 marts must aggregate. Count-based ML metrics must decide about `partial` days
+(`run_status`). Never sum prices across `currency_id`, and ARS cannot be compared with Olist's
+BRL/EUR. `best_seller_position` is a demand proxy, comparable within one category and day. The
+offer list is capped at 100 per product (7 of 337 real product-days), so `offers_in_product` /
+`price_rank_in_product` cover the captured offers only. `dim_date` now reads
+`stg_mercadolibre__runs`: a database without `raw_mercadolibre` cannot build. dbt unit-test
+inputs with `text[]` columns must be `format: sql` (dbt-postgres types dict fixtures as `ARRAY`).
+`fixture_db` imports `tests/mercadolibre/ml_fixtures.py` by path (tests/ is not a package): keep
+that file's helper signatures stable or update `ml_fixture_days.py`. Storage: the fact's full
+daily rebuild is cheap (≈ 2 MB, 0.15 s on 4 real days); the growth is raw `offers` (≈ 2.7 MB a
+day, ≈ 1 GB a year, mostly `payload`): PLAN 2.7 (corrected in review round 1).
+Files touched: warehouse/models/staging/mercadolibre/** (new), warehouse/models/core/
+{fact_offer_snapshot,dim_ml_product,dim_ml_seller,dim_ml_category}.sql,
+`_core__ml_models.yml`, `_core__ml_unit_tests.yml` (new), warehouse/models/core/dim_date.sql,
+`_core__models.yml` (dim_date description), warehouse/macros/ml_included_run_statuses.sql (new),
+warehouse/tests/generic/expression_is_true.sql (new), warehouse/tests/core/
+{assert_fact_offer_snapshot_reconciles_with_raw,assert_fact_offer_snapshot_discount_rules,
+assert_fact_offer_snapshot_best_seller_matches_highlights,assert_ml_dims_cover_their_sources}.sql
+(new), warehouse/tests/core/assert_dim_date_holiday_flag_matches_calendar.sql,
+warehouse/ci/{fixture_db.py,ml_fixture_days.py (new)}, warehouse/fixtures/README.md,
+warehouse/README.md, tests/warehouse/test_fixture_db.py, docs/DATA_CONTRACT.md (§3),
+docs/DECISIONS.md (ADR-019), docs/PLAN.md, docs/PROGRESS.md
+
+**Review round 1 (2026-11-06, PR #17 reviewed after a real-data run, PASS=364 WARN=0; six
+findings, fixed in 6a367ec).** (M1) **NULL `seller_id` / `price` / `currency_id`** (§1b allows
+them) are handled like a NULL `item_id`: the fact leaves out an offer missing any of the four,
+each is a staging `not_null` **warning** on `stg_mercadolibre__offers` (never a red daily build,
+never a silent drop), the fact's `not_null` tests stay errors (the filter guarantees them), and
+`assert_fact_offer_snapshot_reconciles_with_raw` counts raw rows with the same four-column rule.
+Option "keep the rows, warn in core" rejected (every price metric would have to filter NULLs; a
+NULL seller has no dimension member). (M2) **Storage docs corrected** (ADR-019 consequences, §3
+storage, the gotcha above): raw `offers` ≈ 11 MB for 4 days (≈ 2.7 MB a day, ≈ 1 GB a year,
+mostly `payload`) is the problem, not the fact (≈ 2 MB, full rebuild 0.15 s), so no incremental
+model; PLAN **2.7** added (data-engineer, owner decision). (L1) `dim_ml_category` header 23 → 19
+rows. (L2) **`discount_pct` is now the unrounded ratio** (4 decimals gave `0.0000` with
+`has_discount` true below 0.005 %); the discount test requires 0 < pct < 1 and the exact ratio;
+§3 and ADR-019 say marts round for display. (L3) the fact unit test reads `logistic_type` and
+`deal_ids` per row: `is_fulfillment` true / false (cross_docking, xd_drop_off) / NULL and
+`has_deal` true (one and two deals) / false (empty) / NULL; plus offers missing seller, price or
+currency and a 0.01-on-1,000,000 discount. (L4) the partial fixture day gains four malformed P1
+offers (O8 no `item_id`, O9 no `seller_id`, O10 no `price`, O11 no `currency_id`), so the
+**fixture build now has WARN=4 by design** (exactly those four staging tests; fixtures README,
+`ml_fixture_days.py` docstring, and `test_ml_fixture_days_go_through_the_real_loader` asserts
+one offer per column on one day). Real data has none: expected real build PASS=367 WARN=0.
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, port 34143, deleted
+afterwards; no Neon, no real data this round): `ruff check .` clean; fresh DB `fixture_db load`
+→ `dbt build` **PASS=363 WARN=4 ERROR=0** (TOTAL 367: 1 hook, 27 models, 7 unit tests, 332 data
+tests; +3 staging warnings) → `fixture_db check` ok (29 raw relations unchanged); `pytest
+tests/warehouse` 42 passed; full `pytest` 404 passed, 2 skipped (Olist real data). Fixture core
+rows unchanged (fact 11, products 5, sellers 6, categories 3). Negative checks on the fact: each
+of "NULL item_id / seller_id / price / currency_id kept", "pct rounded to 4 decimals", "has_deal
+with `>= 0`", "has_deal with `= 1`", "is_fulfillment coalesced to false", "is_fulfillment as `<>
+'cross_docking'`" fails the unit test; with unit tests excluded, each "NULL ... kept" mutation
+fails the reconciliation test and that column's fact `not_null` test.
+Files touched (round 1): warehouse/models/core/{fact_offer_snapshot.sql,dim_ml_category.sql,
+_core__ml_models.yml,_core__ml_unit_tests.yml}, warehouse/models/staging/mercadolibre/
+{stg_mercadolibre__offers.sql,_mercadolibre__models.yml}, warehouse/tests/core/
+{assert_fact_offer_snapshot_reconciles_with_raw,assert_fact_offer_snapshot_discount_rules}.sql,
+warehouse/ci/ml_fixture_days.py, warehouse/fixtures/README.md, tests/warehouse/test_fixture_db.py,
+docs/DATA_CONTRACT.md (§3), docs/DECISIONS.md (ADR-019), docs/PLAN.md (2.7), docs/PROGRESS.md
+
+**Review round 2 (2026-11-06, PR #17 REQUEST CHANGES on one point; fixed on the branch, re-review
+pending).** (M1) `dbt build` exits 0 on warnings and the fixture build's WARN=4 was only a
+count, so a swapped or missing warning could hide behind it. New checker
+`python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json`
+(CI `dbt` job, step "Check the expected warnings", right after the fixture `dbt build`): exit 1
+unless the tests with status `warn` are exactly `EXPECTED_WARNINGS` (the four
+`not_null_stg_mercadolibre__offers_{item_id,seller_id,price,currency_id}`), each with
+`failures == 1`, and no node is `fail` / `error` / `runtime error` / `skipped` (skipped added:
+dbt skips only below a failure). Messages name node ids, statuses and counts only, never dbt's
+`message` or SQL; root causes first, at most 20 lines (as `warehouse_report`). Tests match on
+the name part of the `unique_id` (`test.<pkg>.<name>.<hash>`), so the hash suffix does not
+matter. The expected set lives in `warehouse/ci/ml_fixture_days.py`, next to O8–O11
+(`MALFORMED_OFFER_COLUMNS` → `EXPECTED_WARNINGS`). The parsing mirrors
+`scripts.warehouse_report.dbt_result_counts` (plus `failures`) instead of importing it, which
+would pull `ingestion.db` into a JSON check. 36 pytest cases on synthetic `run_results.json`
+(`tests/warehouse/test_expected_warnings.py`, no dbt or DB needed, so they also run in the
+`python` job): exact set passes; each of the four missing, an expected test passing, three
+extra warnings (incl. a model with a matching name), a same-count swap, failures 0/2/17/None,
+a duplicate, fail/error/runtime error/skipped on a test/model/unit test (dbt's message never
+printed), an expected test turned `fail`, the output cap, unreadable/empty/absent files and the
+usage error each give the right exit code and message. (L1) wording above fixed. (L3) ADR-019:
+a non-positive `price` or an unexpected `currency_id` stays a hard failure on purpose (the
+fact's `positive` / `accepted_values` [ARS, USD] errors), because it violates the contract
+rather than being a missing value; the ADR's CI-fixtures bullet names the checker.
+Validation on PostgreSQL 16.15 (initdb as non-root `claude` under /tmp, free port, cluster
+deleted afterwards; no Neon, no real data): `ruff check .` clean; fresh DB `fixture_db load` →
+`dbt build` PASS=363 WARN=4 ERROR=0 → `expected_warnings` ok (exit 0) → `fixture_db check` ok
+(29 raw relations unchanged); full `pytest` 440 passed, 2 skipped (Olist real data); `pytest
+tests/warehouse` 78 passed; actionlint 1.7.7 (release checksum verified) clean on ci.yml.
+End-to-end negative checks on real builds, each exit 1 naming the right ids: O9 removed (WARN=3:
+missing `..._seller_id`, status pass); `price` not_null severity error (ERROR=1, SKIP=62: the
+`fail` listed first, capped at 20 lines); **same-count swap** (O9 removed and the highlights
+`type` list narrowed to [PRODUCT, USER_PRODUCT], so the ITEM highlight warns: still WARN=4,
+one failure each, which a count check accepts): unexpected
+`accepted_values_stg_mercadolibre__highlights_type__PRODUCT__USER_PRODUCT`, missing `..._seller_id`.
+Gotchas for the next agent: a new fixture case that adds a warning must add it to
+`EXPECTED_WARNINGS` (with its failure count) or CI fails; the checker is for the **fixture**
+build only (a real/Neon build expects WARN=0 and is reported by `warehouse_report`, not
+checked by this). Mutating the fixtures needs a fresh DB: `fixture_db load` refuses a database
+with more rows than the (smaller) fixtures, by design.
+Proposed CLAUDE.md Commands row (orchestrator), after the dbt build row:
+- `| Check the fixture dbt build warned about exactly the expected tests (CI, after the fixture build) | python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json |`
+and the exit-code line "`expected_warnings` exits 0 ok, 1 unexpected/missing warning, wrong
+failure count, a failing/skipped node or unreadable run_results, 2 usage error".
+Files touched (round 2): warehouse/ci/expected_warnings.py (new), warehouse/ci/ml_fixture_days.py
+(`EXPECTED_WARNINGS`), tests/warehouse/test_expected_warnings.py (new), .github/workflows/ci.yml,
+warehouse/fixtures/README.md, docs/DECISIONS.md (ADR-019), docs/PROGRESS.md
 
 ### 2026-11-05 — orchestrator — 2.1 live on Neon
 Done: PR #15 merged (67c1073) after two review rounds, both with a dbt build on the real Olist data

@@ -8,9 +8,10 @@ models:
   - name: dim_date
     description: >
       Grain: one row per calendar day (date_day), whole years spanning every Olist order
-      timestamp (real: 2016-01-01..2018-12-31, 1,096 rows). is_br_public_holiday = nationwide
-      Brazilian public holiday (Nager.Date global and type Public); NULL in a year with no BR
-      holiday calendar loaded.
+      timestamp and every Mercado Libre snapshot_date (conformed; real since task 2.2:
+      2016-01-01..2026-12-31, 4,018 rows). is_br_public_holiday / is_ar_public_holiday =
+      nationwide public holiday of that country (Nager.Date global and type Public); NULL in a
+      year with no holiday calendar loaded for the country.
     columns:
       - name: date_day
         data_tests: [not_null, unique]

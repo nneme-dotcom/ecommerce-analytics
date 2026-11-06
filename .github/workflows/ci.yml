@@ -85,6 +85,10 @@ jobs:
         run: python -m warehouse.ci.fixture_db load --inventory "$RUNNER_TEMP/raw_inventory.json"
       - name: dbt build
         run: dbt build --project-dir warehouse --profiles-dir warehouse
+      # dbt build exits 0 on warnings: fail unless the warnings are exactly the four expected
+      # staging not_null tests (1 failing row each) and nothing failed (ADR-019).
+      - name: Check the expected warnings
+        run: python -m warehouse.ci.expected_warnings --run-results warehouse/target/run_results.json
       - name: Check schemas (only staging/core/marts created, raw_* untouched)
         run: python -m warehouse.ci.fixture_db check --inventory "$RUNNER_TEMP/raw_inventory.json"
       # The dbt guard tests (schema rule, contract test) need dbt, so the python job skips them.

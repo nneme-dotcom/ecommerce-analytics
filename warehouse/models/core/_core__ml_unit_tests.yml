@@ -1,0 +1,144 @@
+# dbt unit tests for the Mercado Libre core rules of ADR-019: exact expected outputs from small
+# inline inputs, independent of the fixture or real data. Only the listed columns are compared.
+# Days: 2026-01-01 success, 2026-01-02 partial, 2026-01-03 failed (rows on the failed day must
+# never appear, although a real failed day holds no offers or highlights).
+version: 2
+
+unit_tests:
+  - name: fact_offer_snapshot_status_discount_rank_and_best_seller
+    description: >
+      Failed days and offers without item_id, seller_id, price or currency_id are left out
+      (pA's NULL item_id; pC's iS, iP, iC); partial days are kept with their run_status.
+      Discount only where original_price > price (not when equal, lower or NULL); discount_pct
+      is the unrounded ratio (pC's iX, a 0.01 discount on 1,000,000, is not 0). Best seller =
+      lowest PRODUCT position that day, NULL positions last, ties by category_id; USER_PRODUCT
+      entries never rank a product. price_rank_in_product is rank() per currency (ties share a
+      rank); offers_in_product counts the product's fact rows that day. is_fulfillment is true
+      only for fulfillment (false for cross_docking and xd_drop_off, NULL without a
+      logistic_type); has_deal is true with one or two deal ids, false for an empty list, NULL
+      when deal_ids is NULL (pB, pC).
+    model: fact_offer_snapshot
+    given:
+      - input: ref('stg_mercadolibre__runs')
+        format: sql
+        rows: &runs |
+          select '2026-01-01'::date as snapshot_date, 'success'::text as status
+          union all select '2026-01-02'::date, 'partial'::text
+          union all select '2026-01-03'::date, 'failed'::text
+      # SQL format: dbt types dict fixtures from information_schema, which names text[] columns
+      # "ARRAY" (not castable), so inputs with array columns list only the columns the model reads.
+      - input: ref('stg_mercadolibre__offers')
+        format: sql
+        rows: |
+          select
+              d::date as snapshot_date, p::text as product_id, i::text as item_id,
+              s::bigint as seller_id, price::numeric as price, op::numeric as original_price,
+              cur::text as currency_id, null::text as category_id,
+              '2026-01-01 06:00:00+00'::timestamptz as captured_at, null::text as condition,
+              null::text as listing_type_id, null::bigint as official_store_id,
+              null::boolean as free_shipping, lt::text as logistic_type,
+              null::text as shipping_mode, deals::text[] as deal_ids
+          from (values
+              ('2026-01-01', 'pA', 'i1', 1, 80, 100, 'ARS', null, null),
+              ('2026-01-01', 'pA', 'i2', 2, 80, 80, 'ARS', null, null),
+              ('2026-01-01', 'pA', 'i3', 3, 90, null, 'ARS', null, null),
+              ('2026-01-01', 'pA', 'iU', 4, 10, 12, 'USD', null, null),
+              ('2026-01-01', 'pA', null, 5, 1, null, 'ARS', null, null),
+              ('2026-01-01', 'pB', 'i4', 1, 50, 40, 'ARS', 'xd_drop_off', '{D1,D2}'),
+              ('2026-01-01', 'pC', 'iF', 6, 30, null, 'ARS', 'fulfillment', '{D1}'),
+              ('2026-01-01', 'pC', 'iX', 7, 999999.99, 1000000, 'ARS', 'cross_docking', '{}'),
+              ('2026-01-01', 'pC', 'iZ', 8, 50, null, 'ARS', null, null),
+              ('2026-01-01', 'pC', 'iS', null, 20, null, 'ARS', 'fulfillment', '{D1}'),
+              ('2026-01-01', 'pC', 'iP', 9, null, 100, 'ARS', 'fulfillment', '{D1}'),
+              ('2026-01-01', 'pC', 'iC', 9, 25, null, null, 'fulfillment', '{D1}'),
+              ('2026-01-02', 'pA', 'i1', 1, 70, 100, 'ARS', null, null),
+              ('2026-01-03', 'pA', 'i1', 1, 60, 100, 'ARS', null, null)
+          ) as v (d, p, i, s, price, op, cur, lt, deals)
+      - input: ref('stg_mercadolibre__highlights')
+        rows:
+          - {snapshot_date: '2026-01-01', category_id: C2, product_id: pA, position: 3, type: PRODUCT}
+          - {snapshot_date: '2026-01-01', category_id: C1, product_id: pA, position: 3, type: PRODUCT}
+          - {snapshot_date: '2026-01-01', category_id: C0, product_id: pA, position: null, type: PRODUCT}
+          - {snapshot_date: '2026-01-01', category_id: C1, product_id: pB, position: 1, type: USER_PRODUCT}
+          - {snapshot_date: '2026-01-02', category_id: C2, product_id: pA, position: 1, type: PRODUCT}
+          - {snapshot_date: '2026-01-03', category_id: C1, product_id: pA, position: 1, type: PRODUCT}
+    expect:
+      rows:
+        - {snapshot_date: '2026-01-01', item_id: i1, run_status: success, has_discount: true, discount_amount: 20, discount_pct: '0.20000000000000000000', is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i2, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i3, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 3}
+        - {snapshot_date: '2026-01-01', item_id: iU, run_status: success, has_discount: true, discount_amount: 2, discount_pct: '0.16666666666666666667', is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C1, best_seller_position: 3, best_seller_category_count: 3, offers_in_product: 4, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: i4, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: false, has_deal: true, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 1, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: iF, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: true, has_deal: true, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 3, price_rank_in_product: 1}
+        - {snapshot_date: '2026-01-01', item_id: iX, run_status: success, has_discount: true, discount_amount: '0.01', discount_pct: '0.0000000100000000000000000000', is_fulfillment: false, has_deal: false, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 3, price_rank_in_product: 3}
+        - {snapshot_date: '2026-01-01', item_id: iZ, run_status: success, has_discount: false, discount_amount: null, discount_pct: null, is_fulfillment: null, has_deal: null, is_best_seller: false, best_seller_category_id: null, best_seller_position: null, best_seller_category_count: 0, offers_in_product: 3, price_rank_in_product: 2}
+        - {snapshot_date: '2026-01-02', item_id: i1, run_status: partial, has_discount: true, discount_amount: 30, discount_pct: '0.30000000000000000000', is_fulfillment: null, has_deal: null, is_best_seller: true, best_seller_category_id: C2, best_seller_position: 1, best_seller_category_count: 1, offers_in_product: 1, price_rank_in_product: 1}
+
+  - name: dim_ml_product_type_1_and_sources
+    description: >
+      One row per product seen on an included day in products, offers or a PRODUCT highlight.
+      Attributes are the whole products row of the latest included day (a NULL brand there
+      stays NULL; the failed day's row is ignored). A product only seen in offers or only in a
+      highlight has no details. USER_PRODUCT ids and failed-day-only products are not products.
+    model: dim_ml_product
+    given:
+      - input: ref('stg_mercadolibre__runs')
+        format: sql
+        rows: *runs
+      - input: ref('stg_mercadolibre__products')
+        rows:
+          - {snapshot_date: '2026-01-01', product_id: pA, name: old name, brand: X}
+          - {snapshot_date: '2026-01-02', product_id: pA, name: new name, brand: null}
+          - {snapshot_date: '2026-01-03', product_id: pA, name: failed-day name, brand: Y}
+      - input: ref('stg_mercadolibre__offers')
+        format: sql
+        rows: |
+          select d::date as snapshot_date, p::text as product_id, i::text as item_id
+          from (values
+              ('2026-01-01', 'pA', 'i1'),
+              ('2026-01-01', 'pA', 'i2'),
+              ('2026-01-02', 'pC', 'i3'),
+              ('2026-01-03', 'pD', 'i4')
+          ) as v (d, p, i)
+      - input: ref('stg_mercadolibre__highlights')
+        rows:
+          - {snapshot_date: '2026-01-01', category_id: C1, product_id: pA, position: 1, type: PRODUCT}
+          - {snapshot_date: '2026-01-02', category_id: C1, product_id: pA, position: 2, type: PRODUCT}
+          - {snapshot_date: '2026-01-01', category_id: C1, product_id: pE, position: 3, type: PRODUCT}
+          - {snapshot_date: '2026-01-01', category_id: C1, product_id: pF, position: 4, type: USER_PRODUCT}
+    expect:
+      rows:
+        - {product_id: pA, product_name: new name, brand: null, has_product_details: true, attributes_as_of: '2026-01-02', first_seen_date: '2026-01-01', last_seen_date: '2026-01-02', days_ranked: 2, days_with_offers: 1}
+        - {product_id: pC, product_name: null, brand: null, has_product_details: false, attributes_as_of: null, first_seen_date: '2026-01-02', last_seen_date: '2026-01-02', days_ranked: 0, days_with_offers: 1}
+        - {product_id: pE, product_name: null, brand: null, has_product_details: false, attributes_as_of: null, first_seen_date: '2026-01-01', last_seen_date: '2026-01-01', days_ranked: 1, days_with_offers: 0}
+
+  - name: dim_ml_seller_latest_state
+    description: >
+      seller_state = the latest included day's non-NULL state (a later NULL does not erase
+      it; several on that day: lowest in byte order); failed days and NULL seller ids are
+      ignored; a seller that never gave a state has NULL.
+    model: dim_ml_seller
+    given:
+      - input: ref('stg_mercadolibre__runs')
+        format: sql
+        rows: *runs
+      - input: ref('stg_mercadolibre__offers')
+        format: sql
+        rows: |
+          select d::date as snapshot_date, s::bigint as seller_id, st::text as seller_state
+          from (values
+              ('2026-01-01', 1, 'Bariloche'),
+              ('2026-01-02', 1, null),
+              ('2026-01-03', 1, 'Quilmes'),
+              ('2026-01-01', 2, 'Zarate'),
+              ('2026-01-02', 2, 'Mendoza'),
+              ('2026-01-02', 2, 'Azul'),
+              ('2026-01-03', 3, 'Salta'),
+              ('2026-01-01', 4, null),
+              ('2026-01-01', null, 'Tandil')
+          ) as v (d, s, st)
+    expect:
+      rows:
+        - {seller_id: 1, seller_state: Bariloche, first_seen_date: '2026-01-01', last_seen_date: '2026-01-02', days_seen: 2}
+        - {seller_id: 2, seller_state: Azul, first_seen_date: '2026-01-01', last_seen_date: '2026-01-02', days_seen: 2}
+        - {seller_id: 4, seller_state: null, first_seen_date: '2026-01-01', last_seen_date: '2026-01-01', days_seen: 1}

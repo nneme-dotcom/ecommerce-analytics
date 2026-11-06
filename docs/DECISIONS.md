@@ -483,3 +483,86 @@ Items with no rate on or within 7 days before their purchase date (none in the r
 2016-09-04 .. 2018-10-17, against FX from 2016-09-01) have NULL EUR amounts. Prefixes with
 `has_invalid_coordinates` drop out of any map or distance metric; their orders still count in
 every other metric.
+
+## ADR-019 — Mercado Libre price history: partial days kept, type 1 dimensions, conformed date dimension (2026-11-06)
+
+**Context.** Task 2.2 models the daily ML snapshots (`raw_mercadolibre`, DATA_CONTRACT §1b) in
+dbt. Facts from the real data (4 days, counts only): every day `success`; ≈ 2.4 k offers a day;
+offers carry a leaf `category_id` that differs from the ranked category for ≈ 20 % of rows;
+`official_store_id` varies within a seller (8 sellers have two); 3 products changed name or
+brand across days; 7 of 337 product-days hit the 100-offer cap; no NULL `item_id`, seller or
+price. A product's detail call can fail while its offers are still captured (snapshot.py), and
+a run is `partial` whenever any call failed or the request cap was hit (ADR-007). The API has no
+sales data; the best-seller position is the demand proxy. The ECB publishes no ARS rate
+(ADR-012). `core.dim_date` covered only 2016–2018.
+
+**Decision.**
+- **Run statuses.** `success` and `partial` days count; `failed` days do not (one macro,
+  `ml_included_run_statuses`, used by every ML model and test). A partial day's observations
+  are real (a price seen is a price that was offered); only coverage may be incomplete, and
+  dropping those days would lose price points and break day-over-day series for products that
+  were captured. Every fact row carries `run_status` so coverage-sensitive metrics can keep
+  `success` only. Considered: keeping only `success` (loses real data on the most likely bad
+  days, e.g. one category's 500) and keeping only the categories in `runs.categories` (the
+  offers of a captured category's products are what is there; nothing to filter).
+- **Grain and key.** `fact_offer_snapshot` = one row per (`snapshot_date`, `product_id`,
+  `item_id`), Mercado Libre's natural ids (as ADR-018). **Offers missing a column the fact
+  needs are left out, one rule for all four:** `item_id` (cannot be followed across days),
+  `seller_id` (no seller), `price` or `currency_id` (cannot be priced, compared or ranked).
+  §1b allows NULL in each. Each NULL is a staging **warning** (a hard failure would turn one
+  malformed API row into a red daily build; a silent drop would hide a payload change), the
+  rows stay in staging, and the fact's `not_null` tests on the four stay errors because the
+  filter guarantees them. A non-positive `price` or an unexpected `currency_id` stays a hard
+  failure on purpose (the fact's `positive` and `accepted_values` [ARS, USD] tests are errors):
+  it violates the contract rather than being a missing value. Reconciliation is per day
+  against raw, read from the source, with the same four-column rule, so any other dropped row
+  fails it. Considered (review round 1):
+  keeping such rows and downgrading the fact's `not_null` tests to warnings; rejected because
+  every price metric and the per-currency rank would then have to filter NULLs themselves,
+  and a NULL seller would be a fact row without a dimension member.
+- **Measures.** Prices as published, in `currency_id`, never converted (no ARS rate); the
+  discount exists only where `original_price > price` (an "original" at or below the price is
+  not a discount, and such rows exist), as an amount and an **unrounded** fraction (review
+  round 1: 4-decimal rounding gave `discount_pct = 0.0000` with `has_discount` true for a
+  discount below 0.005 %; display rounding belongs to marts).
+  Best-seller columns pick the product's lowest position across the categories ranking it that
+  day (ties by `category_id` byte order) and keep the number of ranking categories, so the fact
+  stays one row per offer. Two window measures per product and day, `offers_in_product` and
+  `price_rank_in_product` (per currency), are the basis of the competitive-pricing marts.
+- **Dimensions** `dim_ml_product`, `dim_ml_seller`, `dim_ml_category` (prefix `ml_`, no clash
+  with Olist). **Type 1**: the latest included day's values (product: the whole latest products
+  row, `attributes_as_of`; seller: latest non-NULL state). Type 2 would add validity ranges and a
+  date-range join for attributes nobody prices on; what moves daily (price, shipping, official
+  store, rank) is on the fact already. Members come from every place an id appears (products ∪
+  offers ∪ PRODUCT highlights; highlights ∪ offer categories), so every fact key resolves even
+  when a detail call failed. Categories have no name: the snapshot does not fetch them.
+- **Dates: extend `dim_date`** (conformed) instead of a plain column: its range is the whole
+  years spanned by the Olist timestamps and the ML snapshot dates (2016–2026 on the real data,
+  4,018 rows; the gap years keep it contiguous, ~2.9 k rows), and it gains
+  `is_ar_public_holiday` / `ar_holiday_name` with the BR rule (the AR calendar has been loaded
+  for this since task 1.5). One calendar for both sub-models, and FKs can be tested.
+- **Exposure.** These tables are offer-level third-party data; they stay in `core`, which the
+  API never reads (ADR-003, ADR-014). ML marts (2.3) publish aggregates only.
+- **CI fixtures.** `fixture_db load` writes three synthetic day folders (success, partial,
+  failed) with the real snapshot writer from `tests/mercadolibre/ml_fixtures.py` and loads them
+  with `ingestion.mercadolibre.load` (ADR-016); fixed run ids and timestamps make the files
+  byte-identical. Their four malformed offers give the fixture build exactly four staging
+  warnings; CI pins them by test name and failure count (`warehouse.ci.expected_warnings`,
+  review round 2), because `dbt build` exits 0 on warnings and a count alone can hide a
+  swapped one. dbt unit tests feed `stg_mercadolibre__runs` / `__offers` as SQL fixtures,
+  because dbt-postgres types dict fixtures from information_schema, which reports `text[]` as
+  the uncastable `ARRAY`.
+
+**Consequences.** The fact is rebuilt in full by every `dbt build`; that is cheap (≈ 0.15 s
+and ≈ 2 MB for 4 real days, ≈ 220 bytes a row, ≈ 190 MB a year at today's volume), so it stays
+a table, not an incremental model. **Storage pressure comes from raw:**
+`raw_mercadolibre.offers` measured ≈ 11 MB for the same 4 days (≈ 2.7 MB a day, mostly
+`payload`), ≈ 1 GB a year, the whole Neon free plan (ADR-014). Handling that is PLAN 2.7
+(owner decision: trim/compress `payload`, a retention window in Neon with the data repo as
+system of record, or a paid plan); until then the job summary's 80 % warning (ADR-017) is the
+alarm. `dim_date` now
+depends on `raw_mercadolibre`, so a database without that schema fails the build (CI and Neon
+always load it). Staging views on `raw_mercadolibre` make a loader re-create on drift fail (as
+for Olist, by design). Count-based ML metrics must say whether they use partial days. Prices in
+ARS cannot be compared with the Olist BRL/EUR amounts. A product ranked in two categories
+appears once per offer, with its best category; per-category rankings come from the highlights.
