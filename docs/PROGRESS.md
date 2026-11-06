@@ -5,7 +5,7 @@ Current state at the top; handoff log below (newest first).
 ## Current state
 
 - **Phase:** 2 — Model and metrics (Phase 1 approved by the owner on 2026-11-04; 1.3 still counting days)
-- **Next up:** merge of 2.2 (ML price-history model, branch `warehouse/ml-price-model`, in review: round 1 findings fixed in 6a367ec; round 2 REQUEST CHANGES (M1: the fixture build's four warnings were never checked by name) addressed below, re-review pending), then 2.3 marts. 2.7 (ML raw storage ≈ 1 GB a year vs Neon's 1 GB) needs an owner decision. 2.6 closes once `pg_database_size` is read from a run's job summary (first chained `daily` run 42035192719 succeeded and loaded only `raw_mercadolibre`). 1.3 is at 2 of 3 *scheduled* successes (2026-11-04 and 2026-11-05, both ~8 h late). Neon PostgreSQL version still to be confirmed by the owner. Follow-ups 1.6–1.12 alongside.
+- **Next up:** 2.3 business metric marts. 2.6 closes once `pg_database_size` is read from a run's job summary (owner). 2.7 (ML raw storage growth) needs an owner decision before Neon nears 80 %. Neon PostgreSQL version still to be confirmed. Follow-ups 1.6–1.13 alongside.
 - **Blockers:** none.
 
 ## Handoff template
@@ -19,6 +19,16 @@ Files touched:
 ```
 
 ## Log
+
+### 2026-11-06 — orchestrator — 2.2 live on Neon; 1.3 done
+Done: PR #17 merged (09755a5) after three review rounds (two with a dbt build on the real data in a
+throwaway database). Manual `mode=daily` run 42245133238 on Neon: ML 0 days loaded / 4 unchanged,
+`dbt build` PASS=367 WARN=0 ERROR=0 on the real data. PLAN 2.2 → done.
+1.3 → done: three consecutive scheduled ML snapshot successes, 2026-11-04 (41835070250),
+2026-11-05 (42034833284) and 2026-11-06 (42222455687), each firing ~8 h after the 05:23 UTC cron.
+The chained warehouse runs after the last two also succeeded (42035192719, 42222746776).
+Not done / open: 2.6 (`pg_database_size` from a job summary, owner); 2.7 owner decision.
+Files touched: docs/PLAN.md, docs/PROGRESS.md
 
 ### 2026-11-06 — analytics-engineer — 2.2 (branch `warehouse/ml-price-model`)
 Done: contract first (DATA_CONTRACT §3: `mercadolibre` source, "Mercado Libre staging", "core
